@@ -1,7 +1,7 @@
 """HTTP client for the CardTrader Full API v2.
 
 Reference: https://www.cardtrader.com/docs/api/full/reference
-Only the endpoints MTG Ledger needs are wrapped. Responses are returned as
+Only the endpoints CardLedger needs are wrapped. Responses are returned as
 plain dicts/lists; mapping to Ledger models lives in `ledger.services`.
 """
 

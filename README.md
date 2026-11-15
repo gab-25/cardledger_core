@@ -1,8 +1,8 @@
-# mtg_ledger_core
-MTG Ledger — Magic: The Gathering collection and CardTrader sales manager (Django).
+# cardledger_core
+CardLedger — trading card collection and CardTrader sales manager (Django).
 
 This repository is the server: the data, the CardTrader and OpenRouter integrations and a JSON API under `/api/`.
-The interface is a React single-page app in [mtg_ledger_ui](https://github.com/gab-25/mtg_ledger_ui); Django serves
+The interface is a React single-page app in [cardledger_ui](https://github.com/gab-25/cardledger_ui); Django serves
 its `index.html` for every page URL and its assets under `/static/ui/`.
 
 ## Structure
@@ -22,7 +22,7 @@ docker compose up -d db
 ```
 
 Connection settings come from environment variables (defaults match `compose.yaml`):
-`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` (all default `mtg_ledger`), `POSTGRES_HOST` (`localhost`),
+`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` (all default `cardledger`), `POSTGRES_HOST` (`localhost`),
 `POSTGRES_PORT` (`5432`), `POSTGRES_CONN_MAX_AGE` (`60` seconds).
 
 ```bash
@@ -34,7 +34,7 @@ uv run python manage.py runserver
 
 Tests: `uv run python manage.py test`
 
-The pages come from the React UI, a git submodule in `ui/` pinned to a commit of mtg_ledger_ui: build it once and
+The pages come from the React UI, a git submodule in `ui/` pinned to a commit of cardledger_ui: build it once and
 Django serves `ui/dist` (set `UI_APP_DIR` to serve another build). Without an `index.html` there every page answers
 *UI not built*.
 
@@ -44,18 +44,18 @@ git submodule update --init                     # or clone with --recurse-submod
 uv run python manage.py runserver
 ```
 
-To work on the interface, run Django as above and `npm run dev` in `ui/` (or in a separate mtg_ledger_ui checkout):
+To work on the interface, run Django as above and `npm run dev` in `ui/` (or in a separate cardledger_ui checkout):
 Vite serves the whole site with live reload and forwards `/api/`, `/admin/` and `/static/` to Django.
 
 ## Docker
 
-The image is published to `ghcr.io/gab-25/mtg_ledger_core` only when a GitHub release is published (`.github/workflows/release.yml`, after the tests pass). Tests run on every PR and push to `main` (`.github/workflows/tests.yml`).
+The image is published to `ghcr.io/gab-25/cardledger_core` only when a GitHub release is published (`.github/workflows/release.yml`, after the tests pass). Tests run on every PR and push to `main` (`.github/workflows/tests.yml`).
 
 Run the whole stack (PostgreSQL + app built from the local `Dockerfile`) with Docker Compose:
 
 ```bash
 docker compose up -d --build
-docker compose exec mtg_ledger python manage.py createsuperuser
+docker compose exec cardledger python manage.py createsuperuser
 ```
 
 The app is served on http://localhost:8000 (`APP_PORT` to change it). Compose reads overrides from the environment
@@ -68,7 +68,7 @@ docker run -p 8000:8000 \
   -e POSTGRES_HOST=db.example.com -e POSTGRES_PASSWORD=... \
   -e DJANGO_SECRET_KEY=... -e DJANGO_ALLOWED_HOSTS=ledger.example.com \
   -e DJANGO_CSRF_TRUSTED_ORIGINS=https://ledger.example.com \
-  ghcr.io/gab-25/mtg_ledger_core:latest
+  ghcr.io/gab-25/cardledger_core:latest
 ```
 
 Environment variables: the `POSTGRES_*` ones above, `DJANGO_SECRET_KEY`, `DJANGO_DEBUG` (default `false` in the image),
@@ -88,7 +88,7 @@ sign-up page.
 Upgrading a single-user Ledger: the existing data goes to the first superuser, so create one before upgrading if there
 is none (the migration stops with a message otherwise, and the new container does not start: create the superuser with
 the old image, or with a one-off container of the new one, e.g.
-`docker compose run --rm mtg_ledger python manage.py createsuperuser`, which skips the migrations).
+`docker compose run --rm cardledger python manage.py createsuperuser`, which skips the migrations).
 
 ## CardTrader
 
@@ -139,7 +139,7 @@ uv run python manage.py sync_catalog --set CODE     # reload one expansion now, 
 ```
 
 With Docker Compose the `worker` and `redis` services start with the stack; queue a sync with
-`docker compose exec mtg_ledger python manage.py sync_catalog`.
+`docker compose exec cardledger python manage.py sync_catalog`.
 
 ## Scanning cards with the camera
 
@@ -151,7 +151,7 @@ Uncertain cards ask you to pick among candidates; **Review** shows the draft (du
 "list for sale above €X" threshold and saves everything at once (listed copies get the CardTrader market price; listings
 are created as *To publish*).
 
-- The scan screens are part of the React UI ([mtg_ledger_ui](https://github.com/gab-25/mtg_ledger_ui)), under
+- The scan screens are part of the React UI ([cardledger_ui](https://github.com/gab-25/cardledger_ui)), under
   `/scan/...`; they talk to the JSON API under `/api/scan/`. All the scan logic stays here.
 - The API is built with Django REST Framework (`ledger/api/`, `accounts/api.py`), with the Django session and the
   `csrftoken` cookie (sent back as `X-CSRFToken`). Its OpenAPI schema is at `/api/schema/` and the interactive docs
@@ -176,7 +176,7 @@ are created as *To publish*).
 ### Trying it from your phone in development (Tailscale)
 
 The camera needs HTTPS. [Tailscale](https://tailscale.com) gives the development server an HTTPS address with a
-real certificate that only your own devices can reach; mtg_ledger_ui's `npm run dev:phone` publishes it.
+real certificate that only your own devices can reach; cardledger_ui's `npm run dev:phone` publishes it.
 
 1. Install Tailscale on the computer and on the phone, signed in with the same account, and keep it connected on
    the phone while testing. In the Tailscale admin console enable **MagicDNS** and **HTTPS Certificates**. If
@@ -191,7 +191,7 @@ real certificate that only your own devices can reach; mtg_ledger_ui's `npm run 
    carry no such header and stay HTTP.
 3. Start the database (`docker compose up -d db`) and Django (`uv run python manage.py runserver`), with
    `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` set for card recognition.
-4. In mtg_ledger_ui run `npm run dev:phone`: it checks Tailscale and that Django accepts the tailnet name, then
+4. In cardledger_ui run `npm run dev:phone`: it checks Tailscale and that Django accepts the tailnet name, then
    publishes the Vite dev server (the UI with live reload, `/api/`, `/admin/` and `/static/` forwarded to Django) with
    `tailscale serve` and prints the `https://<pc>.<tailnet>.ts.net` address. Ctrl+C removes the Tailscale rule.
 5. Open that address on the computer, connect CardTrader in **Profile and settings**, start a session in

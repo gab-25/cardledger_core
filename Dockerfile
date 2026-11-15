@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# The React UI (gab-25/mtg_ledger_ui), built from the `ui` git submodule at the commit it is pinned to:
+# The React UI (gab-25/cardledger_ui), built from the `ui` git submodule at the commit it is pinned to:
 # check it out first (`git submodule update --init`, or actions/checkout with `submodules: true`).
 FROM node:26-slim AS ui
 WORKDIR /ui

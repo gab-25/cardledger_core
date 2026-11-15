@@ -219,7 +219,7 @@ def export_csv(request):
     items = CollectionItem.objects.owned_by(request.user)
     response = HttpResponse(content_type="text/csv; charset=utf-8")
     stamp = timezone.localdate().isoformat()
-    response["Content-Disposition"] = f'attachment; filename="mtg-ledger-{stamp}.csv"'
+    response["Content-Disposition"] = f'attachment; filename="cardledger-{stamp}.csv"'
     services.export_csv(items, response)
     SyncLog.objects.create(owner=request.user, message=f"CSV export: collection exported ({items.count():,} rows)")
     return response

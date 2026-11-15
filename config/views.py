@@ -5,7 +5,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 
 @ensure_csrf_cookie
 def ui_app(request):
-    """The React UI (gab-25/mtg_ledger_ui): every page URL serves its index.html; the app routes on the client.
+    """The React UI (gab-25/cardledger_ui): every page URL serves its index.html; the app routes on the client.
 
     No login here: the UI asks /api/me/ and goes to its login page when nobody is logged in.
     """

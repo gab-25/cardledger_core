@@ -18,7 +18,7 @@ PRODUCT_LIST_URLS = (
     "https://downloads.s3.cardmarket.com/productCatalog/productList/products_singles_1.json",
     "https://downloads.s3.cardmarket.com/productCatalog/productList/products_nonsingles_1.json",
 )
-USER_AGENT = "mtg-ledger/0.1"
+USER_AGENT = "cardledger/0.1"
 
 # Price guide key -> CardmarketPrice field
 PRICE_FIELDS = {

@@ -1,11 +1,11 @@
 services:
-  mtg_ledger:
+  cardledger:
     build: .
-    image: ghcr.io/gab-25/mtg_ledger_core:local
+    image: ghcr.io/gab-25/cardledger_core:local
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-mtg_ledger}
-      POSTGRES_USER: ${POSTGRES_USER:-mtg_ledger}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mtg_ledger}
+      POSTGRES_DB: ${POSTGRES_DB:-cardledger}
+      POSTGRES_USER: ${POSTGRES_USER:-cardledger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cardledger}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-compose-key}
@@ -27,12 +27,12 @@ services:
 
   worker:
     build: .
-    image: ghcr.io/gab-25/mtg_ledger_core:local
+    image: ghcr.io/gab-25/cardledger_core:local
     command: celery -A config worker --loglevel=info --concurrency=1
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-mtg_ledger}
-      POSTGRES_USER: ${POSTGRES_USER:-mtg_ledger}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mtg_ledger}
+      POSTGRES_DB: ${POSTGRES_DB:-cardledger}
+      POSTGRES_USER: ${POSTGRES_USER:-cardledger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cardledger}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-compose-key}
@@ -43,7 +43,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      mtg_ledger:
+      cardledger:
         condition: service_started
     restart: unless-stopped
 
@@ -60,9 +60,9 @@ services:
   db:
     image: postgres:17
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-mtg_ledger}
-      POSTGRES_USER: ${POSTGRES_USER:-mtg_ledger}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mtg_ledger}
+      POSTGRES_DB: ${POSTGRES_DB:-cardledger}
+      POSTGRES_USER: ${POSTGRES_USER:-cardledger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cardledger}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:

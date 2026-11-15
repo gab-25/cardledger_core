@@ -576,7 +576,7 @@ class TrendPriceTest(LedgerTestCase):
 class CsvTest(LedgerTestCase):
     def test_export_then_import_roundtrip(self):
         resp = self.client.get(reverse("ledger:api_export"))
-        self.assertTrue(resp["Content-Disposition"].startswith('attachment; filename="mtg-ledger-'))
+        self.assertTrue(resp["Content-Disposition"].startswith('attachment; filename="cardledger-'))
         csv_bytes = resp.content
         self.assertTrue(csv_bytes.startswith(b"name,set,condition,language,foil,quantity,number\r\n"))
         before = CollectionItem.objects.count()
