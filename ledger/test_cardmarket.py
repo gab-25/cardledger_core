@@ -6,7 +6,7 @@ from django.test import TestCase
 
 from . import cardmarket
 from .models import Card, CardmarketPrice
-from .tests import LedgerTestCase, cm_id, load_catalog
+from .tests import LedgerTestCase, cm_id, load_catalog, game
 
 GUIDE = {
     "version": 1, "createdAt": "2026-11-07T02:45:31+0100",
@@ -87,33 +87,33 @@ class SuggestedPriceTest(LedgerTestCase):
         CardmarketPrice.objects.create(id_product=cm_id(1201), trend=Decimal("1.20"), trend_foil=Decimal("3.00"))
 
     def test_non_foil_uses_trend_via_product_link(self):
-        card = Card.objects.create(name="Ragavan", set_code="MH2", collector_number="138", cm_product_id=cm_id(1001))
+        card = Card.objects.create(game=game(), name="Ragavan", set_code="MH2", collector_number="138", cm_product_id=cm_id(1001))
         self.assertEqual(cardmarket.suggested_price(card, foil=False), Decimal("42.00"))
 
     def test_foil_uses_trend_foil(self):
-        card = Card.objects.create(name="Ragavan", set_code="MH2", collector_number="138", cm_product_id=cm_id(1001))
+        card = Card.objects.create(game=game(), name="Ragavan", set_code="MH2", collector_number="138", cm_product_id=cm_id(1001))
         self.assertEqual(cardmarket.suggested_price(card, foil=True), Decimal("61.25"))
 
     def test_foil_without_foil_trend(self):
         CardmarketPrice.objects.filter(pk=cm_id(1201)).update(trend_foil=None)
-        card = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45",
+        card = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
                                    cm_product_id=cm_id(1201))
         self.assertIsNone(cardmarket.suggested_price(card, foil=True))
 
     def test_zero_trend_is_no_price(self):
         CardmarketPrice.objects.filter(pk=cm_id(1201)).update(trend_foil=Decimal("0.00"))
-        card = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45",
+        card = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
                                    cm_product_id=cm_id(1201))
         self.assertIsNone(cardmarket.suggested_price(card, foil=True))
 
     def test_card_without_product_found_by_set_and_number(self):
-        card = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="045")
+        card = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="045")
         self.assertEqual(cardmarket.suggested_price(card, foil=False), Decimal("1.20"))
 
     def test_unknown_printing(self):
-        card = Card.objects.create(name="X", set_code="PLST", collector_number="9")
+        card = Card.objects.create(game=game(), name="X", set_code="PLST", collector_number="9")
         self.assertIsNone(cardmarket.suggested_price(card, foil=False))
 
     def test_product_without_price_row(self):
-        card = Card.objects.create(name="Solitude", set_code="MH2", collector_number="32", cm_product_id=cm_id(1002))
+        card = Card.objects.create(game=game(), name="Solitude", set_code="MH2", collector_number="32", cm_product_id=cm_id(1002))
         self.assertIsNone(cardmarket.suggested_price(card, foil=False))

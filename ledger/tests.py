@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from . import services
 from .cardtrader import CardTraderClient, CardTraderError, money
-from .models import Blueprint, Card, CardmarketPrice, CollectionItem, Listing, Order, OrderItem, SyncConflict, SyncLog, SyncService
+from .models import MAGIC, Blueprint, Card, CardmarketPrice, CollectionItem, Game, Listing, Order, OrderItem, SyncConflict, SyncLog, SyncService
 
 
 LANGUAGE_PROP = {"name": "mtg_language", "type": "string", "default_value": "en", "possible_values": ["en", "it"]}
@@ -22,6 +22,11 @@ SINGLE_PROPS = [
     LANGUAGE_PROP,
     {"name": "mtg_foil", "type": "boolean", "default_value": "false", "possible_values": [True, False]},
 ]
+
+
+def game(slug=MAGIC):
+    """A game of the catalog, by slug (Magic by default)."""
+    return Game.by_slug(slug)
 
 
 def cm_id(ct_id):
@@ -55,9 +60,12 @@ def load_catalog():
     """Put the test catalog in the database, as the catalog sync would."""
     from .models import Blueprint, Category, Expansion
 
-    expansions = {code: Expansion.objects.update_or_create(code=code, defaults={"name": name, "released_at": day})[0]
+    magic = game(MAGIC)
+    expansions = {code: Expansion.objects.update_or_create(game=magic, code=code,
+                                                           defaults={"name": name, "released_at": day})[0]
                   for code, name, day in CATALOG_EXPANSIONS}
-    categories = {i: Category.objects.update_or_create(cm_id=i, defaults={"name": name})[0]
+    categories = {i: Category.objects.update_or_create(game=magic, cm_id=i,
+                                                       defaults={"name": name, "is_single": i == 1})[0]
                   for i, name in CATALOG_CATEGORIES}
     for cm, code, name, number, category in CATALOG:
         Blueprint.objects.update_or_create(cm_product_id=cm, defaults={
@@ -254,7 +262,7 @@ def load_demo(owner):
 
     items = {}
     for name, set_code, cond, lang, qty, _price, listing in CARDS:
-        card, _ = Card.objects.get_or_create(name=name, set_code=set_code)
+        card, _ = Card.objects.get_or_create(game=game(), name=name, set_code=set_code)
         item, _ = CollectionItem.objects.get_or_create(
             owner=owner, card=card, condition=cond, language=lang, foil=False,
             defaults={"quantity": qty},
@@ -357,7 +365,7 @@ class PagesTest(LedgerTestCase):
         self.assertNotIn("color_filters", data)
 
     def test_pagination_payload(self):
-        card = Card.objects.create(name="Island", set_code="ZZZ")
+        card = Card.objects.create(game=game(), name="Island", set_code="ZZZ")
         CollectionItem.objects.bulk_create(
             [CollectionItem(owner=self.user, card=card, condition="NM", language="EN", quantity=1)
              for i in range(60)]
@@ -472,7 +480,7 @@ class ItemTest(LedgerTestCase):
         Blueprint.objects.filter(cm_product_id=cm_id(1390)).update(image_url="https://img/1390.jpg",
                                                     image_large_url="https://img/show_1390.jpg")
         add(self, cm_id(1390))
-        Card.objects.create(name="Loose Card", set_code="ZZZ")  # no blueprint
+        Card.objects.create(game=game(), name="Loose Card", set_code="ZZZ")  # no blueprint
         CollectionItem.objects.create(owner=self.user, card=Card.objects.get(name="Loose Card"), quantity=1)
         rows = {r["name"]: r for r in self.client.get(reverse("ledger:api_collection")).json()["results"]}
         self.assertEqual(rows["Dominaria United Draft Booster Box"]["image_url"], "https://img/1390.jpg")
@@ -532,7 +540,7 @@ class TrendPriceTest(LedgerTestCase):
         self.assertEqual(self.prices()[("Dominaria United Draft Booster Box", True)], "150.00")
 
     def test_unlinked_card_has_no_price(self):
-        card = Card.objects.create(name="Loose Card", set_code="ZZZ")
+        card = Card.objects.create(game=game(), name="Loose Card", set_code="ZZZ")
         CollectionItem.objects.create(owner=self.other, card=card, quantity=1)
         self.assertIsNone(self.prices()[("Loose Card", False)])
 
@@ -540,7 +548,7 @@ class TrendPriceTest(LedgerTestCase):
         self.guide(1301, Decimal("12.75"), Decimal("14.34"))
         add(self, cm_id(1301), quantity=2)
         add(self, cm_id(1301), foil=True)
-        CollectionItem.objects.create(owner=self.other, card=Card.objects.create(name="Loose", set_code="ZZZ"),
+        CollectionItem.objects.create(owner=self.other, card=Card.objects.create(game=game(), name="Loose", set_code="ZZZ"),
                                       quantity=5)
         self.assertEqual(self.collection()["stats"]["value"], "39.84")
 
@@ -614,7 +622,7 @@ class CsvTest(LedgerTestCase):
 
     def test_import_leaves_printing_held_by_another_card(self):
         load_dmu(self)
-        Card.objects.create(name="Sheoldred, the Apocalypse", set_code="DMU", collector_number=f"CM{cm_id(1301)}",
+        Card.objects.create(game=game(), name="Sheoldred, the Apocalypse", set_code="DMU", collector_number=f"CM{cm_id(1301)}",
                             cm_product_id=cm_id(1301))
         upload = SimpleUploadedFile("c.csv", b"name,set,number\nSheoldred the Apocalypse,DMU,107\n")
         self.assertEqual(self.client.post(reverse("ledger:api_import"), {"file": upload}).status_code, 200)
@@ -836,7 +844,7 @@ class ProductSellingTest(LedgerTestCase):
         self.assertEqual(self.properties(self.mat), {})
 
     def test_publish_unknown_expansion_fails_only_that_listing(self):
-        card = Card.objects.create(name="Mystery", set_code="ZZZ", collector_number="1", cm_product_id=1)
+        card = Card.objects.create(game=game(), name="Mystery", set_code="ZZZ", collector_number="1", cm_product_id=1)
         item = CollectionItem.objects.create(owner=self.user, card=card, quantity=1)
         mystery = Listing.objects.create(item=item, quantity=1, price=Decimal("1.00"))
         resp = self.publish()
@@ -1106,7 +1114,7 @@ class SellingIsolationTest(LedgerTestCase):
     """self.user (the admin) sells with their own token; self.other is a friend."""
 
     def friend_listing(self, status=Listing.Status.TO_PUBLISH, ct_product_id=None, name="Lightning Bolt"):
-        card = Card.objects.create(name=name, set_code="M10", ct_blueprint_id=1001 if name == "Lightning Bolt" else None)
+        card = Card.objects.create(game=game(), name=name, set_code="M10", ct_blueprint_id=1001 if name == "Lightning Bolt" else None)
         item = CollectionItem.objects.create(owner=self.other, card=card, quantity=2)
         return Listing.objects.create(item=item, quantity=1, price=Decimal("1.00"), status=status,
                                       ct_product_id=ct_product_id)

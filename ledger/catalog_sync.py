@@ -13,13 +13,15 @@ from itertools import batched
 
 from . import cardmarket, catalog, scryfall
 from .cardmarket import PRICE_FIELDS, CardmarketError
-from .models import CARD_CATEGORY_ID, Blueprint, CardmarketPrice, Category, Expansion, SyncLog
+from .models import MAGIC, Blueprint, CardmarketPrice, Category, Expansion, Game, SyncLog
 from .scryfall import ScryfallError
 
 BATCH = 2000
 # Blueprints missing from the files are removed only when the download holds at least this share of the catalog:
 # a truncated or emptied file must not wipe it.
 PRUNE_MIN_SHARE = 0.5
+# The Cardmarket category of Magic's single cards ("Magic Single", tokens included); the others are products.
+CARD_CATEGORY_ID = 1
 
 logger = logging.getLogger(__name__)
 
@@ -91,19 +93,21 @@ def _write(rows, categories, sets, prices, guide_date):
 
     codes = {r[2] for r in rows}
     pruned = 0
+    magic = Game.by_slug(MAGIC)
     with transaction.atomic():
         prune = len(rows) >= PRUNE_MIN_SHARE * Blueprint.objects.count()
         Expansion.objects.bulk_create(
-            [Expansion(code=code, name=sets[code].name if code in sets else code.upper(),
+            [Expansion(game=magic, code=code, name=sets[code].name if code in sets else code.upper(),
                        released_at=sets[code].released_at if code in sets else None) for code in sorted(codes)],
-            update_conflicts=True, unique_fields=["code"], update_fields=["name", "released_at"],
+            update_conflicts=True, unique_fields=["game", "code"], update_fields=["name", "released_at"],
         )
         Category.objects.bulk_create(
-            [Category(cm_id=i, name=name) for i, name in categories.items()],
-            update_conflicts=True, unique_fields=["cm_id"], update_fields=["name"],
+            [Category(game=magic, cm_id=i, name=name, is_single=i == CARD_CATEGORY_ID)
+             for i, name in categories.items()],
+            update_conflicts=True, unique_fields=["game", "cm_id"], update_fields=["name", "is_single"],
         )
-        expansion_pk = dict(Expansion.objects.filter(code__in=codes).values_list("code", "pk"))
-        category_pk = dict(Category.objects.values_list("cm_id", "pk"))
+        expansion_pk = dict(Expansion.objects.filter(game=magic, code__in=codes).values_list("code", "pk"))
+        category_pk = dict(Category.objects.filter(game=magic).values_list("cm_id", "pk"))
         # Models are built and written one batch at a time: all of them at once do not fit in the worker.
         for chunk in batched(rows, BATCH):
             Blueprint.objects.bulk_create(

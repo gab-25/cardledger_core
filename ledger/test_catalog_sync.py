@@ -11,7 +11,7 @@ from django.test import TestCase
 from . import cardmarket, catalog, catalog_sync, scryfall
 from .models import Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Listing, SyncLog
 from .test_scryfall import FakeScryfall, image
-from .tests import LedgerTestCase
+from .tests import LedgerTestCase, game
 
 TOKEN, UNMATCHED, ORPHAN = 501250, 501203, 777001
 
@@ -125,8 +125,8 @@ class SyncTest(CatalogSyncTestCase):
         self.assertEqual((result.expansions, result.blueprints, result.priced), (3, 7, 2))
 
     def test_expansions_and_categories_without_printings_are_removed(self):
-        Expansion.objects.create(code="old", name="Old CardTrader code")
-        Category.objects.create(cm_id=99, name="Old category")
+        Expansion.objects.create(game=game(), code="old", name="Old CardTrader code")
+        Category.objects.create(game=game(), cm_id=99, name="Old category")
         self.sync()
         self.assertFalse(Expansion.objects.filter(code="old").exists())
         self.assertFalse(Category.objects.filter(cm_id=99).exists())
@@ -164,7 +164,7 @@ class SyncTest(CatalogSyncTestCase):
         self.assertIn("RuntimeError: db down", SyncLog.objects.latest("pk").message)
 
     def test_run_sync_logs_summary(self):
-        Card.objects.create(name="Nowhere", set_code="ZZZ", collector_number="1")
+        Card.objects.create(game=game(), name="Nowhere", set_code="ZZZ", collector_number="1")
         self.run_sync()
         log = SyncLog.objects.latest("pk")
         self.assertEqual(log.level, SyncLog.Level.OK)
@@ -176,7 +176,7 @@ class SyncTest(CatalogSyncTestCase):
 
 class PruneTest(CatalogSyncTestCase):
     def old_blueprint(self, cm, **fields):
-        old = Expansion.objects.get_or_create(code="ctold", defaults={"name": "Old CardTrader set"})[0]
+        old = Expansion.objects.get_or_create(game=game(), code="ctold", defaults={"name": "Old CardTrader set"})[0]
         return Blueprint.objects.create(cm_product_id=cm, expansion=old, name="Old lot", **fields)
 
     def test_blueprints_no_longer_in_the_files_are_removed(self):
@@ -225,9 +225,9 @@ class ReconcileTest(CatalogSyncTestCase):
         return item
 
     def test_existing_card_rewritten_to_catalog_code(self):
-        mat = Card.objects.create(name="Dominaria United Playmat", set_code="DMU", collector_number="CT1391",
+        mat = Card.objects.create(game=game(), name="Dominaria United Playmat", set_code="DMU", collector_number="CT1391",
                                   cm_product_id=501391)
-        token = Card.objects.create(name="Soldier Token", set_code="DMR", collector_number="CT9999",
+        token = Card.objects.create(game=game(), name="Soldier Token", set_code="DMR", collector_number="CT9999",
                                     cm_product_id=TOKEN)
         catalog.reconcile_cards()
         mat.refresh_from_db()
@@ -236,8 +236,8 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertEqual((token.set_code, token.collector_number), ("TDMR", "1"))
 
     def test_rewrite_collision_merges_cards(self):
-        old = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="CT1201", cm_product_id=501201)
-        csv = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45")
+        old = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="CT1201", cm_product_id=501201)
+        csv = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45")
         self.stack(old, 2)
         self.stack(csv, 3)
         result = catalog.reconcile_cards()
@@ -248,8 +248,8 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertFalse(Card.objects.filter(collector_number="CT1201").exists())
 
     def test_duplicate_product_with_live_listings_warns_owner(self):
-        first = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
-        second = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="CT1299",
+        first = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
+        second = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="CT1299",
                                      cm_product_id=501201)
         self.stack(first, listing=Listing.Status.PUBLISHED)
         self.stack(second, listing=Listing.Status.TO_PUBLISH)
@@ -261,8 +261,8 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertIn("both have live listings", warning.message)
 
     def test_duplicate_product_without_listings_is_merged(self):
-        first = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
-        second = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="CT1299",
+        first = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
+        second = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="CT1299",
                                      cm_product_id=501201)
         self.stack(second, 2)
         catalog.reconcile_cards()
@@ -270,21 +270,21 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertEqual(first.items.get().quantity, 2)
 
     def test_unlinked_card_linked_by_set_and_number(self):
-        card = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="045")
+        card = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="045")
         result = catalog.reconcile_cards()
         card.refresh_from_db()
         self.assertEqual((card.cm_product_id, card.collector_number), (501201, "45"))
         self.assertGreaterEqual(result.linked, 1)
 
     def test_single_without_scryfall_number_keeps_its_own(self):
-        card = Card.objects.create(name="Brainstorm", set_code="2XM", collector_number="129", cm_product_id=UNMATCHED)
+        card = Card.objects.create(game=game(), name="Brainstorm", set_code="2XM", collector_number="129", cm_product_id=UNMATCHED)
         catalog.reconcile_cards()
         card.refresh_from_db()
         self.assertEqual((card.set_code, card.collector_number), ("2XM", "129"))
 
     def test_duplicate_product_with_different_numbers_is_unlinked_not_merged(self):
-        base = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
-        showcase = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="300",
+        base = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
+        showcase = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="300",
                                        cm_product_id=501201)
         self.stack(showcase, 2)
         catalog.reconcile_cards()
@@ -294,7 +294,7 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertTrue(Card.objects.filter(pk=base.pk, cm_product_id=501201).exists())
 
     def test_card_with_unknown_product_stays_as_is(self):
-        card = Card.objects.create(name="Gone", set_code="OLD", collector_number="CT1", cm_product_id=424242)
+        card = Card.objects.create(game=game(), name="Gone", set_code="OLD", collector_number="CT1", cm_product_id=424242)
         result = catalog.reconcile_cards()
         card.refresh_from_db()
         self.assertEqual((card.set_code, card.collector_number), ("OLD", "CT1"))

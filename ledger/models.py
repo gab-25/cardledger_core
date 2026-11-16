@@ -52,9 +52,33 @@ class Language(models.TextChoices):
     RU = "RU", "Russian"
 
 
+MAGIC = "mtg"
+
+
+class Game(models.Model):
+    """A trading card game of the catalog (Magic, Pokémon, ...): its Cardmarket and CardTrader ids."""
+
+    slug = models.SlugField(unique=True)
+    name = models.CharField(max_length=100)
+    cm_id = models.PositiveIntegerField("Cardmarket game", unique=True, help_text="Cardmarket's idGame")
+    ct_game_id = models.PositiveIntegerField("CardTrader game", null=True, blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    @classmethod
+    def by_slug(cls, slug):
+        """The game with this slug; Game.DoesNotExist when there is none."""
+        return cls.objects.get(slug=slug)
+
+
 class Card(models.Model):
     """A specific printing of a card (name + set)."""
 
+    game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="cards")
     name = models.CharField(max_length=200)
     set_code = models.CharField(max_length=10)
     collector_number = models.CharField(max_length=40, blank=True, default="")
@@ -73,11 +97,12 @@ class Card(models.Model):
         ordering = ["name", "set_code"]
         constraints = [
             models.UniqueConstraint(
-                fields=["set_code", "collector_number"], condition=~Q(collector_number=""),
+                fields=["game", "set_code", "collector_number"], condition=~Q(collector_number=""),
                 name="unique_card_set_number",
             ),
             models.UniqueConstraint(
-                fields=["name", "set_code"], condition=Q(collector_number=""), name="unique_card_legacy_name_set",
+                fields=["game", "name", "set_code"], condition=Q(collector_number=""),
+                name="unique_card_legacy_name_set",
             ),
             models.UniqueConstraint(
                 fields=["ct_blueprint_id"], condition=Q(ct_blueprint_id__isnull=False), name="unique_card_blueprint",
@@ -316,33 +341,39 @@ class OrderItem(models.Model):
 
 
 class Expansion(models.Model):
-    """A Scryfall MTG set (local catalog copy): its printings come from Cardmarket's product lists."""
+    """A set of a game (local catalog copy), e.g. a Scryfall MTG set: its printings come from Cardmarket's lists."""
 
-    code = models.CharField(max_length=10, unique=True, help_text="Scryfall set code, lower case")
+    game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="expansions")
+    code = models.CharField(max_length=10, help_text="Set code, lower case (Scryfall's for Magic), unique per game")
     name = models.CharField(max_length=200)
     released_at = models.DateField(null=True, blank=True)
+    language = models.CharField(
+        max_length=5, blank=True, default="", help_text='Language of a set printed in one, e.g. "ja"',
+    )
 
     class Meta:
         ordering = ["name"]
+        constraints = [models.UniqueConstraint(fields=["game", "code"], name="unique_expansion_game_code")]
 
     def __str__(self):
         return f"{self.code.upper()} · {self.name}"
 
 
-# The Cardmarket category of cards (collector number, condition, foil): "Magic Single", tokens included.
-# Every other category (sealed, accessories, ...) is a product.
-CARD_CATEGORY_ID = 1
-
-
 class Category(models.Model):
-    """A Cardmarket MTG product category (local catalog copy): single cards, boosters, displays, ..."""
+    """A Cardmarket product category of a game (local catalog copy): single cards, boosters, displays, ..."""
 
-    cm_id = models.PositiveIntegerField("Cardmarket category", unique=True)
+    game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="categories")
+    cm_id = models.PositiveIntegerField("Cardmarket category")
     name = models.CharField(max_length=100, blank=True)
+    is_single = models.BooleanField(
+        default=False, help_text="Single cards (collector number, condition, foil), e.g. \"Magic Single\"; "
+                                 "every other category (sealed, accessories, ...) is a product",
+    )
 
     class Meta:
         ordering = ["name"]
         verbose_name_plural = "categories"
+        constraints = [models.UniqueConstraint(fields=["game", "cm_id"], name="unique_category_game_cm_id")]
 
     def __str__(self):
         return self.name or f"Category {self.cm_id}"
@@ -370,7 +401,7 @@ class Blueprint(models.Model):
     @property
     def is_product(self):
         """Sealed product or accessory rather than a card; a blueprint not yet categorised counts as a card."""
-        return self.category_id is not None and self.category.cm_id != CARD_CATEGORY_ID
+        return self.category_id is not None and not self.category.is_single
 
     def __str__(self):
         number = f" #{self.collector_number}" if self.collector_number else ""

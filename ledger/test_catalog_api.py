@@ -7,13 +7,13 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Listing
-from .tests import LedgerTestCase
+from .tests import LedgerTestCase, game
 
 
 def catalog():
     """A small local catalog: Cardmarket products, some with prices."""
-    m21 = Expansion.objects.create(code="m21", name="Core Set 2021", released_at=date(2020, 7, 3))
-    dmr = Expansion.objects.create(code="dmr", name="Dominaria Remastered", released_at=date(2023, 1, 13))
+    m21 = Expansion.objects.create(game=game(), code="m21", name="Core Set 2021", released_at=date(2020, 7, 3))
+    dmr = Expansion.objects.create(game=game(), code="dmr", name="Dominaria Remastered", released_at=date(2023, 1, 13))
     CardmarketPrice.objects.create(
         id_product=9001, trend=Decimal("12.75"), low=Decimal("10.00"), avg=Decimal("12.50"),
         trend_foil=Decimal("14.34"), prices_date=timezone.now(),
@@ -25,9 +25,9 @@ def catalog():
     )
     Blueprint.objects.create(cm_product_id=9007, expansion=m21, name="Basri Ket", collector_number="7")
     Blueprint.objects.create(cm_product_id=9045, expansion=dmr, name="Counterspell", collector_number="45")
-    single = Category.objects.create(cm_id=1, name="Magic Single Card")
-    boxes = Category.objects.create(cm_id=4, name="Booster Boxes")
-    Category.objects.create(cm_id=40, name="Playmats")  # no blueprint: not listed
+    single = Category.objects.create(game=game(), cm_id=1, name="Magic Single Card", is_single=True)
+    boxes = Category.objects.create(game=game(), cm_id=4, name="Booster Boxes")
+    Category.objects.create(game=game(), cm_id=40, name="Playmats")  # no blueprint: not listed
     Blueprint.objects.filter(cm_product_id__in=[9001, 9007, 9045]).update(category=single)
     Blueprint.objects.create(
         cm_product_id=9900, expansion=dmr, name="Dominaria Remastered Draft Booster Box", category=boxes,
@@ -208,7 +208,7 @@ class CatalogApiTest(LedgerTestCase):
         self.assertEqual(ugin["owned_qty"], 3)
 
     def test_latest_releases_paginate(self):
-        newest = Expansion.objects.create(code="new", name="Newest Set", released_at=date(2026, 1, 1))
+        newest = Expansion.objects.create(game=game(), code="new", name="Newest Set", released_at=date(2026, 1, 1))
         Blueprint.objects.bulk_create(
             Blueprint(cm_product_id=30000 + i, expansion=newest, name=f"Card {i:02}") for i in range(52)
         )
@@ -234,7 +234,7 @@ class CatalogApiTest(LedgerTestCase):
         self.assertEqual((data["searched"], data["count"], data["results"]), (True, 0, []))
 
     def test_pager_keeps_filters(self):
-        tokens = Expansion.objects.create(code="tm21", name="M21 Tokens")
+        tokens = Expansion.objects.create(game=game(), code="tm21", name="M21 Tokens")
         Blueprint.objects.bulk_create(
             Blueprint(cm_product_id=20000 + i, expansion=tokens, name=f"Token {i}") for i in range(60)
         )
@@ -318,7 +318,7 @@ class SmartSearchTest(LedgerTestCase):
         self.assertEqual(self.names(q="zzzxqv"), [])
 
     def test_hyphenated_set_code(self):
-        sld = Expansion.objects.create(code="sld-cvd", name="Secret Lair: CVD")
+        sld = Expansion.objects.create(game=game(), code="sld-cvd", name="Secret Lair: CVD")
         Blueprint.objects.create(cm_product_id=9201, expansion=sld, name="Cool Card", collector_number="1")
         self.assertEqual(self.names(q="sld-cvd"), ["Cool Card"])
         self.assertEqual(self.names(q="SLD-CVD cool"), ["Cool Card"])

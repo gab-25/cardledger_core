@@ -1,6 +1,6 @@
 from . import catalog
 from .models import Blueprint, Card, CollectionItem, Expansion, SyncLog
-from .tests import LedgerTestCase, cm_id, load_catalog
+from .tests import LedgerTestCase, cm_id, load_catalog, game
 
 
 class CatalogTest(LedgerTestCase):
@@ -29,7 +29,7 @@ class CatalogTest(LedgerTestCase):
         self.assertEqual(catalog.card_for_blueprint(bp).pk, catalog.card_for_blueprint(bp).pk)
 
     def test_card_for_blueprint_number_taken_by_another_product(self):
-        Card.objects.create(name="Other", set_code="DMU", collector_number="107", cm_product_id=1)
+        Card.objects.create(game=game(), name="Other", set_code="DMU", collector_number="107", cm_product_id=1)
         card = catalog.card_for_blueprint(Blueprint.objects.get(cm_product_id=cm_id(1301)))
         self.assertEqual(card.collector_number, f"CM{cm_id(1301)}")
         self.assertTrue(SyncLog.objects.filter(message__contains="shares #107").exists())
@@ -44,8 +44,8 @@ class CatalogTest(LedgerTestCase):
 
 class MergeOwnersTest(LedgerTestCase):
     def test_merge_keeps_owners_apart(self):
-        source = Card.objects.create(name="Bolt", set_code="M10")
-        target = Card.objects.create(name="Lightning Bolt", set_code="M10", collector_number="146")
+        source = Card.objects.create(game=game(), name="Bolt", set_code="M10")
+        target = Card.objects.create(game=game(), name="Lightning Bolt", set_code="M10", collector_number="146")
         mine = CollectionItem.objects.create(owner=self.user, card=source, condition="NM", language="EN", quantity=2)
         theirs = CollectionItem.objects.create(owner=self.other, card=target, condition="NM", language="EN", quantity=5)
         self.assertTrue(catalog.merge_cards(source, target))
