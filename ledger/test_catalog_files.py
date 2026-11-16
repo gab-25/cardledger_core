@@ -2,7 +2,9 @@ import gzip
 import hashlib
 import io
 import json
+import os
 from datetime import date
+from unittest import mock
 
 import boto3
 from botocore.response import StreamingBody
@@ -103,3 +105,17 @@ class CatalogBucketTest(SimpleTestCase):
                 CatalogFilesError, "CARDLEDGER_CATALOG_BUCKET is not set"
             ):
                 CatalogBucket()
+
+    def test_empty_region_is_the_same_as_unset(self):
+        # compose forwards AWS_DEFAULT_REGION= from a .env as an empty string; boto3 would build "s3..amazonaws.com"
+        env = {"AWS_DEFAULT_REGION": "", "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y",
+               "AWS_CONFIG_FILE": "/nonexistent"}
+        with mock.patch.dict(os.environ, env), override_settings(CARDLEDGER_CATALOG_ENDPOINT=""):
+            client = CatalogBucket().client
+        self.assertEqual(client.meta.endpoint_url, "https://s3.amazonaws.com")
+
+    def test_configured_region_is_used(self):
+        env = {"AWS_DEFAULT_REGION": "eu-west-1", "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
+        with mock.patch.dict(os.environ, env), override_settings(CARDLEDGER_CATALOG_ENDPOINT=""):
+            client = CatalogBucket().client
+        self.assertEqual(client.meta.region_name, "eu-west-1")

@@ -3,10 +3,12 @@
 import gzip
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import date, datetime
 
 import boto3
+import botocore.session
 from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
 
@@ -72,14 +74,23 @@ def _product(row):
     )
 
 
+def _s3_client(endpoint):
+    """An S3 client from the standard AWS_* settings; an empty AWS_DEFAULT_REGION counts as unset (boto3 would
+    build "https://s3..amazonaws.com" from it)."""
+    region = None
+    if os.environ.get("AWS_DEFAULT_REGION") == "":
+        # What boto3 picks when it is unset: the AWS config file's region, else S3's default one.
+        region = botocore.session.get_session().get_scoped_config().get("region") or "us-east-1"
+    return boto3.client("s3", endpoint_url=endpoint, region_name=region)
+
+
 class CatalogBucket:
     def __init__(self, client=None):
         self.bucket = getattr(settings, "CARDLEDGER_CATALOG_BUCKET", "")
         if not self.bucket:
             raise CatalogFilesError("CARDLEDGER_CATALOG_BUCKET is not set")
         if client is None:
-            endpoint = getattr(settings, "CARDLEDGER_CATALOG_ENDPOINT", "") or None
-            client = boto3.client("s3", endpoint_url=endpoint)
+            client = _s3_client(getattr(settings, "CARDLEDGER_CATALOG_ENDPOINT", "") or None)
         self.client = client
 
     def _read(self, key):
