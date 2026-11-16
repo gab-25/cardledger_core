@@ -148,6 +148,21 @@ uv run python manage.py sync_catalog                # queue a sync (outcome in S
 With Docker Compose the `worker` and `redis` services start with the stack; queue a sync with
 `docker compose exec cardledger python manage.py sync_catalog`.
 
+When the catalog files cannot be read (bucket not configured, unreadable manifest, a game missing from it or a corrupt
+file), the games that already have a catalog keep it as it is but still get the night's Cardmarket prices; their line
+in the Activity log is a warning that tells why the catalog was not updated. A game that fails for any other reason is
+rolled back without stopping the others.
+
+### Deploying this version
+
+- Set `CARDLEDGER_CATALOG_BUCKET` and the `AWS_*` variables (plus `CARDLEDGER_CATALOG_ENDPOINT` for S3-compatible
+  storage) on both the app and the worker, and let the generator publish its files to the bucket first: without
+  them the catalog is not rebuilt (Magic's prices still are).
+- Restart the app and the worker together: the app applies the migrations when it starts, and an old worker running
+  the sync after them would fail.
+- Rolling back below migration `0028` is clean only before the first multi-game sync, or after deleting the
+  `Expansion`, `Category` and `Blueprint` rows of the games other than Magic.
+
 ## Scanning cards with the camera
 
 **Collection → Scan cards** opens a phone-friendly flow: pick an expansion (or *All expansions*) and a default
