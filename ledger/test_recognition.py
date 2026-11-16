@@ -1,6 +1,6 @@
 from .models import Blueprint, Expansion
 from .recognition import Recognition, match
-from .tests import LedgerTestCase, cm_id, load_catalog
+from .tests import LedgerTestCase, cm_id, load_catalog, game
 
 FABLE = "Fable of the Mirror-Breaker"
 
@@ -72,11 +72,11 @@ class PromoNumberMismatchTest(MatchBase):
 
     def setUp(self):
         super().setUp()
-        self.prm = Expansion.objects.create(code="prm", name="30th Anniversary Promos")
+        self.prm = Expansion.objects.create(game=game(), code="prm", name="30th Anniversary Promos")
         for cm, name in [(268473, "Destroy Evil"), (219682, "Arcane Signet"), (262181, "Lotus Petal"),
                          (219684, "Richard Garfield, Ph.D.")]:
             Blueprint.objects.create(cm_product_id=cm, expansion=self.prm, name=name, collector_number="1")
-        self.mrd = Expansion.objects.create(code="mrd", name="Mirrodin")
+        self.mrd = Expansion.objects.create(game=game(), code="mrd", name="Mirrodin")
         Blueprint.objects.create(cm_product_id=5010, expansion=self.mrd, name="Gilded Lotus", collector_number="202")
 
     def rec(self, name="Gilded Lotus"):

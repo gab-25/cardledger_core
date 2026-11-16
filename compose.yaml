@@ -37,6 +37,12 @@ services:
       POSTGRES_PORT: 5432
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-compose-key}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
+      # Forwarded only when set: an empty AWS_DEFAULT_REGION would make boto3 build an invalid S3 URL.
+      CARDLEDGER_CATALOG_BUCKET:
+      CARDLEDGER_CATALOG_ENDPOINT:
+      AWS_ACCESS_KEY_ID:
+      AWS_SECRET_ACCESS_KEY:
+      AWS_DEFAULT_REGION:
       CELERY_BROKER_URL: redis://redis:6379/0
     depends_on:
       db:

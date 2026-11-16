@@ -1,12 +1,12 @@
 from django.contrib import admin
 
-from .models import Blueprint, Card, CardmarketPrice, Category, Expansion, CollectionItem, Listing, Order, OrderItem, SyncConflict, SyncLog, SyncService
+from .models import Blueprint, Card, CardmarketPrice, Category, Expansion, Game, CollectionItem, Listing, Order, OrderItem, SyncConflict, SyncLog, SyncService
 
 
 @admin.register(Card)
 class CardAdmin(admin.ModelAdmin):
-    list_display = ["name", "set_code", "collector_number", "ct_blueprint_id"]
-    list_filter = ["set_code"]
+    list_display = ["name", "game", "set_code", "collector_number", "ct_blueprint_id"]
+    list_filter = ["game", "set_code"]
     search_fields = ["name"]
 
 
@@ -61,15 +61,22 @@ class OrderAdmin(admin.ModelAdmin):
     readonly_fields = ["raw"]
 
 
+@admin.register(Game)
+class GameAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "cm_id", "ct_game_id"]
+
+
 @admin.register(Expansion)
 class ExpansionAdmin(admin.ModelAdmin):
-    list_display = ["code", "name", "released_at"]
+    list_display = ["code", "name", "game", "language", "released_at"]
+    list_filter = ["game"]
     search_fields = ["code", "name"]
 
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ["name", "cm_id"]
+    list_display = ["name", "game", "cm_id", "is_single"]
+    list_filter = ["game"]
     search_fields = ["name"]
 
 

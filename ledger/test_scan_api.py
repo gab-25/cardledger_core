@@ -652,7 +652,8 @@ class SchemaTest(LedgerTestCase):
         self.assertEqual(query("/api/collection/"), {"q", "foil", "set", "cond", "category", "page"})
         self.assertEqual(query("/api/listings/"), {"status"})
         self.assertEqual(query("/api/orders/"), {"tab"})
-        self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "category", "owned", "page"})
+        self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "game", "category", "owned", "page"})
+        self.assertEqual(query("/api/catalog/categories/"), {"game"})
         self.assertNotIn("parameters", schema["paths"]["/api/collection/"]["post"])
 
     def test_schema_version_is_the_project_version(self):

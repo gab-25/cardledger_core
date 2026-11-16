@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from django.db.models import Q
 
 from . import catalog
-from .models import Blueprint
+from .models import MAGIC, Blueprint, Game
 
 MAX_CANDIDATES = 5
 
@@ -30,6 +30,16 @@ class Match:
     reason: str = "not_found"
 
 
+def scan_game():
+    """The game scanned: Magic, until a scan session has its own game."""
+    return Game.by_slug(MAGIC)
+
+
+def _catalog():
+    """Every printing of the game scanned."""
+    return Blueprint.objects.filter(expansion__game=scan_game())
+
+
 def _scope(rec, expansion):
     """(blueprints to search, certain_allowed). Matches outside a known expansion are never certain."""
     code = rec.set_code.strip().lower()
@@ -37,13 +47,13 @@ def _scope(rec, expansion):
         return Blueprint.objects.filter(expansion=expansion), True
     if code:
         # A printed code wins over the locked expansion: boosters hold bonus-sheet and List cards.
-        found = catalog.expansion_by_code(code)
+        found = catalog.expansion_by_code(code, scan_game())
         if found is not None:
             return Blueprint.objects.filter(expansion=found), True
     if expansion is not None:
         return Blueprint.objects.filter(expansion=expansion), False
-    # No usable set code: search the whole local catalog, and let the owner confirm.
-    return Blueprint.objects.all(), False
+    # No usable set code: search the whole local catalog of the game, and let the owner confirm.
+    return _catalog(), False
 
 
 def _by_name(qs, name):
@@ -62,7 +72,7 @@ def same_name(bp, name):
 def _candidates(scope, name, hits=()):
     """Cards with the name read first (number hits, then the scope, then anywhere if the scope has none),
     then number hits with another name. Within each group: by Cardmarket product id."""
-    named = list(_by_name(Blueprint.objects.all(), name).select_related("expansion"))
+    named = list(_by_name(_catalog(), name).select_related("expansion"))
     in_scope = set(scope.filter(pk__in=[b.pk for b in named]).values_list("pk", flat=True))
     if in_scope:
         named = [b for b in named if b.pk in in_scope]

@@ -3,7 +3,7 @@ from decimal import Decimal
 from . import scan
 from .models import Blueprint, Card, CollectionItem, Expansion, Listing, ScanLine, SyncLog
 from .recognition import Match, Recognition
-from .tests import LedgerTestCase, cm_id, load_catalog
+from .tests import LedgerTestCase, cm_id, load_catalog, game
 
 
 class ScanTestCase(LedgerTestCase):
@@ -80,7 +80,7 @@ class NoPriceTest(ScanTestCase):
 
 class SaveTest(ScanTestCase):
     def printing(self, *, quantity=1, listing_status=None):
-        card = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45",
+        card = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
                                    cm_product_id=cm_id(1201))
         item = CollectionItem.objects.create(owner=self.user, card=card, condition="NM", language="IT", quantity=quantity)
         if listing_status:

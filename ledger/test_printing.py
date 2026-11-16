@@ -7,24 +7,24 @@ from decimal import Decimal
 from . import catalog, services
 from .catalog import merge_cards, normalize_number
 from .models import Blueprint, Card, CollectionItem, Expansion, Listing, SyncLog
-from .tests import LedgerTestCase, cm_id, load_catalog
+from .tests import LedgerTestCase, cm_id, load_catalog, game
 
 
 class PrintingModelTest(LedgerTestCase):
     def test_two_printings_same_name_coexist(self):
-        Card.objects.create(name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="141")
-        Card.objects.create(name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356")
+        Card.objects.create(game=game(), name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="141")
+        Card.objects.create(game=game(), name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356")
         self.assertEqual(Card.objects.filter(name="Fable of the Mirror-Breaker").exclude(collector_number="").count(), 2)
 
     def test_same_set_number_rejected(self):
-        Card.objects.create(name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="141")
+        Card.objects.create(game=game(), name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="141")
         with self.assertRaises(IntegrityError), transaction.atomic():
-            Card.objects.create(name="Other", set_code="NEO", collector_number="141")
+            Card.objects.create(game=game(), name="Other", set_code="NEO", collector_number="141")
 
     def test_legacy_rows_still_unique_by_name(self):
-        Card.objects.create(name="X", set_code="M10")
+        Card.objects.create(game=game(), name="X", set_code="M10")
         with self.assertRaises(IntegrityError), transaction.atomic():
-            Card.objects.create(name="X", set_code="M10")
+            Card.objects.create(game=game(), name="X", set_code="M10")
 
     def test_str_shows_number(self):
         card = Card(name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356")
@@ -61,7 +61,7 @@ class ResolvePrintingTest(LedgerTestCase):
         return services.resolve_blueprints(self.ct.client(), cards).unmatched
 
     def test_resolve_by_number_picks_showcase(self):
-        card = Card.objects.create(name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356")
+        card = Card.objects.create(game=game(), name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356")
         self.assertEqual(self.resolve([card]), [])
         card.refresh_from_db()
         self.assertEqual(card.ct_blueprint_id, 1101)
@@ -75,7 +75,7 @@ class ResolvePrintingTest(LedgerTestCase):
 
     def test_resolve_merges_into_existing_printing(self):
         legacy = Card.objects.get(name="Counterspell", set_code="DMR")  # demo: NM/IT x4 @0.80, listed
-        printing = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45",
+        printing = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
                                        ct_blueprint_id=1201)
         CollectionItem.objects.create(owner=self.user, card=printing, condition="NM", language="IT", quantity=2)
         self.assertEqual(self.resolve([legacy]), [])
@@ -86,7 +86,7 @@ class ResolvePrintingTest(LedgerTestCase):
 
     def test_merge_refuses_two_live_listings(self):
         legacy = Card.objects.get(name="Counterspell", set_code="DMR")
-        printing = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45",
+        printing = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
                                        ct_blueprint_id=1201)
         item = CollectionItem.objects.create(owner=self.user, card=printing, condition="NM", language="IT", quantity=1)
         Listing.objects.create(item=item, quantity=1, price=Decimal("1.00"))
@@ -95,21 +95,21 @@ class ResolvePrintingTest(LedgerTestCase):
         self.assertEqual(self.resolve([legacy]), [legacy])
 
     def test_publish_after_merge_uses_surviving_printing(self):
-        printing = Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45",
+        printing = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
                                        ct_blueprint_id=1201)
         self.client.post(reverse("ledger:api_publish"))
         listing = Listing.objects.get(item__card=printing)
         self.assertEqual(listing.status, Listing.Status.PUBLISHED)
 
     def test_resolve_does_not_merge_into_other_blueprint(self):  # I4
-        Card.objects.create(name="Counterspell", set_code="DMR", collector_number="45", ct_blueprint_id=7777)
+        Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45", ct_blueprint_id=7777)
         legacy = Card.objects.get(name="Counterspell", set_code="DMR", collector_number="")
         self.assertEqual(self.resolve([legacy]), [legacy])
         self.assertTrue(Card.objects.filter(pk=legacy.pk, ct_blueprint_id__isnull=True).exists())
 
 
     def test_resolve_by_cardmarket_product(self):
-        card = Card.objects.create(name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="999",
+        card = Card.objects.create(game=game(), name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="999",
                                    cm_product_id=cm_id(1101))
         self.assertEqual(self.resolve([card]), [])
         card.refresh_from_db()
@@ -118,7 +118,7 @@ class ResolvePrintingTest(LedgerTestCase):
     def test_resolve_finds_expansion_by_catalog_name(self):
         load_catalog()
         Expansion.objects.filter(code="dmu").update(code="xdmu")
-        card = Card.objects.create(name="Sheoldred, the Apocalypse", set_code="XDMU", collector_number="107",
+        card = Card.objects.create(game=game(), name="Sheoldred, the Apocalypse", set_code="XDMU", collector_number="107",
                                    cm_product_id=cm_id(1301))
         self.assertEqual(self.resolve([card]), [])
         card.refresh_from_db()
@@ -126,9 +126,9 @@ class ResolvePrintingTest(LedgerTestCase):
 
     def test_resolve_never_folds_two_cardmarket_products(self):
         self.ct.blueprints[11][0]["card_market_ids"] = [cm_id(1101), 777]  # CardTrader lumps two products
-        first = Card.objects.create(name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356",
+        first = Card.objects.create(game=game(), name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356",
                                     cm_product_id=cm_id(1101), ct_blueprint_id=1101)
-        other = Card.objects.create(name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356A",
+        other = Card.objects.create(game=game(), name="Fable of the Mirror-Breaker", set_code="NEO", collector_number="356A",
                                     cm_product_id=777)
         CollectionItem.objects.create(owner=self.user, card=other, condition="NM", language="EN", quantity=1)
         self.assertEqual(self.resolve([other]), [other])
@@ -136,7 +136,7 @@ class ResolvePrintingTest(LedgerTestCase):
         self.assertTrue(Card.objects.filter(pk=first.pk).exists())
 
     def test_resolve_unknown_expansion_stays_unmatched(self):
-        card = Card.objects.create(name="Mystery", set_code="ZZZ", collector_number="1", cm_product_id=1)
+        card = Card.objects.create(game=game(), name="Mystery", set_code="ZZZ", collector_number="1", cm_product_id=1)
         self.assertEqual(self.resolve([card]), [card])
         self.assertNotIn(("GET", "/blueprints/export"), self.ct.calls)
 
@@ -153,7 +153,7 @@ class MergeClashLogTest(LedgerTestCase):
     def test_clash_of_another_user_is_logged_only_for_them(self):
         """The friend's publish hits a duplicate printing that only the admin's live listings keep apart."""
         legacy = Card.objects.get(name="Ragavan, Nimble Pilferer", set_code="MH2")  # admin: live listing
-        printing = Card.objects.create(name="Ragavan, Nimble Pilferer", set_code="MH2", collector_number="138",
+        printing = Card.objects.create(game=game(), name="Ragavan, Nimble Pilferer", set_code="MH2", collector_number="138",
                                        ct_blueprint_id=1001)
         twin = CollectionItem.objects.create(owner=self.user, card=printing, condition="NM", language="EN")
         Listing.objects.create(item=twin, price=Decimal("50.00"), status=Listing.Status.PUBLISHED, ct_product_id=4242)

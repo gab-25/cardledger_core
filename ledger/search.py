@@ -8,10 +8,10 @@ from operator import add
 
 from django.contrib.postgres.search import TrigramSimilarity, TrigramWordSimilarity
 from django.db import connection
-from django.db.models import Case, CharField, F, Func, IntegerField, Q, Value, When
+from django.db.models import Case, CharField, Exists, F, Func, IntegerField, OuterRef, Q, Value, When
 
 from .catalog import normalize_number
-from .models import CARD_CATEGORY_ID, Expansion
+from .models import Expansion
 
 _NUMBER = re.compile(r"\d+[a-z]?")
 # Minimum pg_trgm word similarity of every query word to the name in the typo-tolerant fallback, run only when no
@@ -39,14 +39,16 @@ def normalize_all(texts):
 
 class _Query:
     """q split into terms: a raw token that is a set code (even "sld-cvd") is one term, every other token gives one
-    term per normalised word. Each term is (ids of the set it names or None, words)."""
+    term per normalised word. Each term is (ids of the set it names or None, words). Set codes are looked up only in
+    the games of the blueprints searched (queryset): the same code can name a set of another game."""
 
-    def __init__(self, q):
+    def __init__(self, q, queryset):
         tokens = q.lower().split()
         normalized = normalize_all(tokens)
         candidates = set(tokens) | {w for n in normalized for w in n.split()}
         self.code_ids = defaultdict(list)
-        for code, pk in Expansion.objects.filter(code__in=candidates).values_list("code", "id"):
+        in_games = Exists(queryset.order_by().filter(expansion__game_id=OuterRef("game_id")))
+        for code, pk in Expansion.objects.filter(in_games, code__in=candidates).values_list("code", "id"):
             self.code_ids[code].append(pk)
         self.terms = []
         for token, norm in zip(tokens, normalized):
@@ -83,7 +85,7 @@ def _term_condition(query, ids, words):
 def _tie_breaks():
     """Cards (and blueprints not yet categorised) before sealed products, then newest expansion first."""
     is_product = Case(
-        When(Q(category__isnull=True) | Q(category__cm_id=CARD_CATEGORY_ID), then=Value(0)),
+        When(Q(category__isnull=True) | Q(category__is_single=True), then=Value(0)),
         default=Value(1), output_field=IntegerField(),
     )
     return [is_product, F("expansion__released_at").desc(nulls_last=True), "name", "cm_product_id"]
@@ -91,8 +93,8 @@ def _tie_breaks():
 
 def search_blueprints(queryset, q):
     """The blueprints of the queryset matching every term of q, most relevant first; when none does, the ones whose
-    name is close to q (typos), most similar first."""
-    query = _Query(q)
+    name is close to q (typos), most similar first. The caller keeps the queryset inside one game."""
+    query = _Query(q, queryset)
     phrase = " ".join(query.words)
     rank = Case(
         When(st=phrase, then=Value(0)), When(st__startswith=phrase, then=Value(1)),
