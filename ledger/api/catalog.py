@@ -71,7 +71,7 @@ def catalog(request):
     if searched:
         printings = printings.order_by("name", "expansion__code")
     else:
-        # Latest releases first (Scryfall's release date).
+        # Latest releases first (release date).
         printings = printings.order_by(F("expansion__released_at").desc(nulls_last=True), "name", "expansion__code",
                                        "cm_product_id")
     if set_code:

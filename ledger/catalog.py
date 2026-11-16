@@ -1,4 +1,4 @@
-"""Local card catalog (Cardmarket products described by Scryfall) and printing lookup."""
+"""Local card catalog (the generator's files, with Cardmarket ids) and printing lookup."""
 
 import re
 from dataclasses import dataclass
@@ -222,7 +222,7 @@ def _reconcile_game(game, result):
     for card in cards.filter(cm_product_id__in=list(printings)).order_by("pk"):
         bp = printings[card.cm_product_id]
         if not bp.collector_number and not bp.is_product and card.collector_number:
-            # a single Scryfall gives no number for: the card's own set code and number are the better identity
+            # a single without a collector number: the card's own set code and number are the better identity
             if card.is_product:
                 card.is_product = False
                 card.save(update_fields=["is_product"])

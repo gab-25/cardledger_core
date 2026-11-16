@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 CardLedger server: a Django 6 + Django REST Framework app (Python 3.14, managed with `uv`) that holds a trading card
-collection (Magic: The Gathering for now) and manages CardTrader sales. It exposes only a JSON API under `/api/`; the interface is a
+collection (Magic for now; the catalog already holds Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages CardTrader sales. It exposes only a JSON API under `/api/`; the interface is a
 separate React SPA ([cardledger_ui](https://github.com/gab-25/cardledger_ui)), included as the git submodule `ui/`
 (pinned to a release tag; the Dockerfile builds it in a Node stage), whose built `index.html` Django serves for every
 other URL (`config/views.py`, catch-all route last in `config/urls.py`, files from `UI_APP_DIR`, default `ui/dist`).
@@ -53,14 +53,17 @@ There is no linter or formatter configured. Settings come only from the environm
   which tests patch.
 - **Cards vs printings**: `Card` is the Ledger's own row (name + set + collector number) that `CollectionItem`
   points to, tied to its printing by `Card.cm_product_id`; `Blueprint` is a product of the local catalog, keyed by
-  its Cardmarket product id (`cm_product`, also the row of its Cardmarket price). The catalog is rebuilt only by the
-  nightly `ledger/catalog_sync.py`, from public files and no token: Cardmarket's product lists and price guide
-  (`ledger/cardmarket.py`) and Scryfall's Default Cards and sets (`ledger/scryfall.py`) for set code, collector
-  number, rarity and images. `Expansion` is a Scryfall set (each printing gets its own Scryfall set, so tokens and
-  promos have theirs); products without a Scryfall card go to the main set of their Cardmarket expansion, with no
-  number (cards get a `CM<id>` stand-in). `Blueprint.category` (Cardmarket category) tells cards (id 1) from sealed
-  products and accessories (`is_product`). After each sync `catalog.reconcile_cards` links, folds and rewrites cards
-  to the catalog's set code and number. Collection items are added only from the catalog
+  its Cardmarket product id (`cm_product`, also the row of its Cardmarket price). **Games**: `Game` (mtg, pokemon,
+  lorcana, onepiece, yugioh, riftbound); `Expansion`, `Category` and `Card` belong to a game, uniqueness is per game,
+  and every catalog lookup (recognition, reconcile, resolve_blueprints, API) stays inside one game; the catalog API
+  takes `?game=` (default `mtg`). The catalog is rebuilt only by the nightly `ledger/catalog_sync.py`, with no
+  CardTrader token: it imports the files of the separate generator repo gab-25/cardledger_database from a private
+  S3 bucket (`ledger/catalog_files.py`: `catalog/v1/manifest.json` + `catalog/v1/<slug>.jsonl.gz`; settings
+  `CARDLEDGER_CATALOG_BUCKET`/`_ENDPOINT` plus the standard `AWS_*` variables), only when a game's sha256 changed,
+  and downloads Cardmarket's price guide per game (`ledger/cardmarket.py`, `-foil` or `-holo`). Scryfall and
+  Cardmarket's product lists are not read by the app. `Category.is_single` tells cards from sealed products and
+  accessories (`is_product`). After each sync `catalog.reconcile_cards` links, folds and rewrites cards to the
+  catalog's set code and number, per game. Collection items are added only from the catalog
   (`catalog.card_for_blueprint`); products are stored Near Mint, non-foil. When publishing,
   `services.resolve_blueprints` finds the CardTrader blueprint with the seller's token (CardTrader's `card_market_ids`, then
   number, then name) and what CardTrader takes for a product (its language is sent only if taken). The catalog and

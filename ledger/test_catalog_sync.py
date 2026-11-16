@@ -44,7 +44,7 @@ MAGIC = [
     product(501201, "Counterspell", "dmr", "45", 1, "Magic Single", "uncommon", "counterspell"),
     product(501204, "Ponder", "dmr", "46", 1, "Magic Single", "common", "ponder"),
     product(TOKEN, "Soldier Token", "tdmr", "1", 1, "Magic Single", "common", "token"),
-    product(UNMATCHED, "Brainstorm", "dmr", "", 1, "Magic Single"),  # a single without Scryfall data
+    product(UNMATCHED, "Brainstorm", "dmr", "", 1, "Magic Single"),  # a single without catalog data
     product(501301, "Sheoldred, the Apocalypse", "dmu", "107", 1, "Magic Single", "mythic", "sheoldred"),
     product(501390, "Dominaria United Draft Booster Box", "dmu", "", 5, "Magic Display"),
     product(501391, "Dominaria United Playmat", "dmu", "", 13, "Magic Miscellaneous"),

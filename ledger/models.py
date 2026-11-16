@@ -345,10 +345,10 @@ class OrderItem(models.Model):
 
 
 class Expansion(models.Model):
-    """A set of a game (local catalog copy), e.g. a Scryfall MTG set: its printings come from Cardmarket's lists."""
+    """A set of a game (local catalog copy), e.g. an MTG set: its printings come from the generator files."""
 
     game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="expansions")
-    code = models.CharField(max_length=10, help_text="Set code, lower case (Scryfall's for Magic), unique per game")
+    code = models.CharField(max_length=10, help_text="Set code, lower case, unique per game")
     name = models.CharField(max_length=200)
     released_at = models.DateField(null=True, blank=True)
     language = models.CharField(
@@ -384,7 +384,7 @@ class Category(models.Model):
 
 
 class Blueprint(models.Model):
-    """One printing of a card, or a product, in the local catalog: a Cardmarket product, described by Scryfall."""
+    """One printing of a card, or a product, in the local catalog: a Cardmarket product."""
 
     cm_product = models.OneToOneField(
         "CardmarketPrice", null=True, blank=True, on_delete=models.DO_NOTHING, db_constraint=False,
@@ -395,8 +395,8 @@ class Blueprint(models.Model):
     name = models.CharField(max_length=200, db_index=True)
     collector_number = models.CharField(max_length=40, blank=True)
     rarity = models.CharField(max_length=40, blank=True)
-    image_url = models.URLField(max_length=500, blank=True, help_text="Scryfall's small image")
-    image_large_url = models.URLField(max_length=500, blank=True, help_text="Scryfall's normal image (488×680)")
+    image_url = models.URLField(max_length=500, blank=True, help_text="Small image")
+    image_large_url = models.URLField(max_length=500, blank=True, help_text="Normal image (488×680)")
     category = models.ForeignKey(Category, null=True, blank=True, on_delete=models.SET_NULL, related_name="blueprints")
 
     class Meta:
