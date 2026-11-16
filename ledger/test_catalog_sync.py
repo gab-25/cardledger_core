@@ -1,193 +1,285 @@
 import copy
-from datetime import date
+import gzip
+import hashlib
+import io
+import json
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from io import StringIO
 from unittest import mock
 
 import httpx
+from botocore.exceptions import NoRegionError
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
-from . import cardmarket, catalog, catalog_sync, scryfall
-from .models import Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Listing, SyncLog
-from .test_scryfall import FakeScryfall, image
+from . import cardmarket, catalog, catalog_files, catalog_sync
+from .catalog_files import MANIFEST_KEY, CatalogBucket
+from .models import (
+    Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, Listing, ScanLine, ScanSession,
+    SyncLog,
+)
 from .tests import LedgerTestCase, game
 
-TOKEN, UNMATCHED, ORPHAN = 501250, 501203, 777001
+BUCKET = "test-catalog"
+TOKEN, UNMATCHED = 501250, 501203
+GENERATED_AT = "2026-11-16T18:25:56.894205+00:00"
 
 
-def product(id_product, name, category, expansion):
-    names = {1: "Magic Single", 5: "Magic Display", 13: "Magic Miscellaneous", 9: "Magic Lot"}
-    return {"idProduct": id_product, "name": name, "idCategory": category, "categoryName": names[category],
-            "idExpansion": expansion, "idMetacard": 0, "dateAdded": "2022-01-01 00:00:00"}
+def expansion(code, name, released_at, language=""):
+    return {"type": "expansion", "code": code, "name": name, "released_at": released_at, "language": language}
 
 
-SINGLES = [
-    product(501201, "Counterspell", 1, 77),
-    product(501204, "Ponder", 1, 77),
-    product(TOKEN, "Soldier Token", 1, 77),
-    product(UNMATCHED, "Brainstorm", 1, 77),  # no Scryfall card
-    product(501301, "Sheoldred, the Apocalypse", 1, 78),
+def product(id_product, name, code, number, category, category_name, rarity="", image=""):
+    return {"type": "product", "id_product": id_product, "name": name, "expansion_code": code, "number": number,
+            "rarity": rarity, "image_url": f"https://img/{image}-small.jpg" if image else "",
+            "image_large_url": f"https://img/{image}-normal.jpg" if image else "",
+            "category_id": category, "category_name": category_name}
+
+
+MAGIC = [
+    expansion("dmr", "Dominaria Remastered", "2023-01-13"),
+    expansion("tdmr", "Dominaria Remastered Tokens", "2023-01-13"),
+    expansion("dmu", "Dominaria United", "2022-09-09"),
+    product(501201, "Counterspell", "dmr", "45", 1, "Magic Single", "uncommon", "counterspell"),
+    product(501204, "Ponder", "dmr", "46", 1, "Magic Single", "common", "ponder"),
+    product(TOKEN, "Soldier Token", "tdmr", "1", 1, "Magic Single", "common", "token"),
+    product(UNMATCHED, "Brainstorm", "dmr", "", 1, "Magic Single"),  # a single without Scryfall data
+    product(501301, "Sheoldred, the Apocalypse", "dmu", "107", 1, "Magic Single", "mythic", "sheoldred"),
+    product(501390, "Dominaria United Draft Booster Box", "dmu", "", 5, "Magic Display"),
+    product(501391, "Dominaria United Playmat", "dmu", "", 13, "Magic Miscellaneous"),
 ]
-NONSINGLES = [
-    product(501390, "Dominaria United Draft Booster Box", 5, 78),
-    product(501391, "Dominaria United Playmat", 13, 78),
-    product(ORPHAN, "100 random Commons", 9, 99),  # an expansion without singles
+POKEMON = [
+    expansion("sv1", "Scarlet & Violet", "2023-03-31"),
+    expansion("sv1-ja", "Scarlet ex", "2023-01-20", "ja"),
+    product(700001, "Pikachu", "sv1", "25", 51, "Pokémon Single", "Common", "pikachu"),
+    product(700002, "Scarlet ex Booster", "sv1-ja", "", 52, "Pokémon Booster"),
 ]
-CARDS = [
-    {"cardmarket_id": 501201, "set": "dmr", "collector_number": "45", "rarity": "uncommon",
-     "image_uris": image("counterspell")},
-    {"cardmarket_id": 501204, "set": "dmr", "collector_number": "46", "rarity": "common", "image_uris": image("ponder")},
-    {"cardmarket_id": TOKEN, "set": "tdmr", "collector_number": "1", "rarity": "common", "image_uris": image("token")},
-    {"cardmarket_id": 501301, "set": "dmu", "collector_number": "107", "rarity": "mythic",
-     "image_uris": image("sheoldred")},
-]
-SETS = [
-    {"code": "dmr", "name": "Dominaria Remastered", "released_at": "2023-01-13"},
-    {"code": "tdmr", "name": "Dominaria Remastered Tokens", "released_at": "2023-01-13"},
-    {"code": "dmu", "name": "Dominaria United", "released_at": "2022-09-09"},
-]
-GUIDE = {"version": 1, "createdAt": "2026-11-14T02:45:31+0100", "priceGuides": [
+MAGIC_GUIDE = {"version": 1, "createdAt": "2026-11-14T02:45:31+0100", "priceGuides": [
     {"idProduct": 501201, "trend": 1.2, "trend-foil": 3.5},
     {"idProduct": 501390, "trend": 150.0},
+    {"idProduct": 999999, "trend": 9.0},  # a product the catalog does not hold
+]}
+POKEMON_GUIDE = {"version": 1, "createdAt": "2026-11-14T02:50:00+0100", "priceGuides": [
+    {"idProduct": 700001, "trend": 2.5, "avg": 2.0, "trend-holo": 9.5, "avg-holo": 8.0, "low-holo": 6.0},
 ]}
 
 
-class FakeCardmarket:
-    """Cardmarket's product lists and price guide, served through httpx.MockTransport."""
+def jsonl_gz(lines):
+    return gzip.compress("".join(json.dumps(x) + "\n" for x in lines).encode(), mtime=0)
+
+
+class FakeBucket:
+    """A boto3 S3 client holding the generator's v1 files: a manifest and one gzipped JSON lines file per game."""
 
     def __init__(self):
-        self.singles, self.nonsingles = copy.deepcopy(SINGLES), copy.deepcopy(NONSINGLES)
-        self.guide = copy.deepcopy(GUIDE)
-        self.raw_singles = None
+        self.games = {"mtg": copy.deepcopy(MAGIC), "pokemon": copy.deepcopy(POKEMON)}
+        self.corrupt = set()  # slugs whose file is not gzip (its checksum still matches)
+        self.manifest = None  # raw manifest replacing the generated one
+        self.reads = []
+
+    def _file(self, slug):
+        return b"not a gzip file" if slug in self.corrupt else jsonl_gz(self.games[slug])
+
+    def _manifest(self):
+        if self.manifest is not None:
+            return json.dumps(self.manifest).encode()
+        return json.dumps({"format_version": 1, "games": {
+            slug: {"key": f"catalog/v1/{slug}.jsonl.gz", "sha256": hashlib.sha256(self._file(slug)).hexdigest(),
+                   "generated_at": GENERATED_AT}
+            for slug in self.games
+        }}).encode()
+
+    def get_object(self, Bucket, Key):
+        assert Bucket == BUCKET
+        self.reads.append(Key)
+        if Key == MANIFEST_KEY:
+            data = self._manifest()
+        else:
+            data = self._file(Key.removeprefix("catalog/v1/").removesuffix(".jsonl.gz"))
+        return {"Body": io.BytesIO(data)}
+
+    def sha256(self, slug):
+        return hashlib.sha256(self._file(slug)).hexdigest()
+
+
+class FakeCardmarket:
+    """Cardmarket's price guide files, one per game, served through httpx.MockTransport."""
+
+    def __init__(self):
+        self.guides = {1: copy.deepcopy(MAGIC_GUIDE), 6: copy.deepcopy(POKEMON_GUIDE)}
+        self.fail = set()  # Cardmarket game ids whose guide answers 500
+        self.urls = []
 
     def handler(self, request):
         url = str(request.url)
-        if url == cardmarket.PRICE_GUIDE_URL:
-            return httpx.Response(200, json=self.guide)
-        if url == cardmarket.PRODUCT_LIST_URLS[0]:
-            if self.raw_singles is not None:
-                return httpx.Response(200, content=self.raw_singles)
-            return httpx.Response(200, json={"version": 1, "products": self.singles})
-        if url == cardmarket.PRODUCT_LIST_URLS[1]:
-            return httpx.Response(200, json={"version": 1, "products": self.nonsingles})
+        self.urls.append(url)
+        for cm_game_id, guide in self.guides.items():
+            if url == cardmarket.price_guide_url(cm_game_id):
+                if cm_game_id in self.fail:
+                    return httpx.Response(500, text="boom")
+                return httpx.Response(200, json=guide)
         return httpx.Response(404)
 
     def client(self):
         return cardmarket.make_client(transport=httpx.MockTransport(self.handler))
 
 
+@override_settings(CARDLEDGER_CATALOG_BUCKET=BUCKET)
 class CatalogSyncTestCase(LedgerTestCase):
     def setUp(self):
         super().setUp()
+        self.files = FakeBucket()
         self.cm = FakeCardmarket()
-        self.sf = FakeScryfall(cards=copy.deepcopy(CARDS), sets=copy.deepcopy(SETS))
+
+    def bucket(self):
+        return CatalogBucket(client=self.files)
 
     def sync(self):
-        return catalog_sync.sync(self.cm.client(), self.sf.client())
+        return {r.game: r for r in catalog_sync.sync(self.bucket(), self.cm.client())}
 
     def run_sync(self):
-        return catalog_sync.run_sync(self.cm.client(), self.sf.client())
+        return catalog_sync.run_sync(self.bucket(), self.cm.client())
 
 
 class SyncTest(CatalogSyncTestCase):
-    def test_sync_builds_catalog_from_public_files(self):
-        self.sync()
+    def test_sync_imports_magic_file(self):
+        results = self.sync()
+        mtg = results["mtg"]
+        self.assertEqual((mtg.imported, mtg.error, mtg.expansions, mtg.blueprints, mtg.priced),
+                         (True, "", 3, 7, 2))
         bp = Blueprint.objects.get(cm_product_id=501201)
-        self.assertEqual((bp.name, bp.expansion.code, bp.collector_number, bp.rarity, bp.category.cm_id),
-                         ("Counterspell", "dmr", "45", "uncommon", 1))
+        self.assertEqual((bp.name, bp.expansion.code, bp.expansion.game.slug, bp.collector_number, bp.rarity,
+                          bp.category.cm_id, bp.is_product),
+                         ("Counterspell", "dmr", "mtg", "45", "uncommon", 1, False))
         self.assertEqual((bp.image_url, bp.image_large_url),
                          ("https://img/counterspell-small.jpg", "https://img/counterspell-normal.jpg"))
-        dmr = Expansion.objects.get(code="dmr")
-        self.assertEqual((dmr.name, dmr.released_at), ("Dominaria Remastered", date(2023, 1, 13)))
-        self.assertEqual(Category.objects.get(cm_id=5).name, "Magic Display")
-        self.assertEqual(self.ct.calls, [])  # CardTrader is never contacted
-
-    def test_token_gets_its_own_scryfall_set(self):
-        self.sync()
-        token = Blueprint.objects.get(cm_product_id=TOKEN)
-        self.assertEqual((token.expansion.code, token.collector_number), ("tdmr", "1"))
-
-    def test_product_goes_to_the_main_set_of_its_expansion(self):
-        self.sync()
         box = Blueprint.objects.get(cm_product_id=501390)
         self.assertEqual((box.expansion.code, box.collector_number, box.is_product), ("dmu", "", True))
+        dmr = Expansion.objects.get(game=game(), code="dmr")
+        self.assertEqual((dmr.name, dmr.released_at, dmr.language), ("Dominaria Remastered", date(2023, 1, 13), ""))
+        self.assertEqual(Category.objects.get(game=game(), cm_id=5).name, "Magic Display")
+        magic = game()
+        self.assertEqual(magic.catalog_sha256, self.files.sha256("mtg"))
+        self.assertEqual(magic.catalog_generated_at, datetime(2026, 11, 16, 18, 25, 56, 894205, tzinfo=timezone.utc))
+        self.assertEqual(self.ct.calls, [])  # CardTrader is never contacted
 
-    def test_single_without_scryfall_card_goes_to_the_main_set(self):
+    def test_each_game_gets_its_own_catalog(self):
         self.sync()
-        bp = Blueprint.objects.get(cm_product_id=UNMATCHED)
-        self.assertEqual((bp.expansion.code, bp.collector_number, bp.image_url), ("dmr", "", ""))
+        pikachu = Blueprint.objects.get(cm_product_id=700001)
+        self.assertEqual((pikachu.expansion.game.slug, pikachu.expansion.code, pikachu.collector_number),
+                         ("pokemon", "sv1", "25"))
+        self.assertEqual(Expansion.objects.get(game=game("pokemon"), code="sv1-ja").language, "ja")
+        self.assertFalse(Expansion.objects.filter(game=game(), code="sv1").exists())
 
-    def test_orphan_product_is_skipped_and_counted(self):
-        result = self.sync()
-        self.assertEqual(result.skipped, 1)
-        self.assertFalse(Blueprint.objects.filter(cm_product_id=ORPHAN).exists())
-        self.assertEqual((result.expansions, result.blueprints, result.priced), (3, 7, 2))
-
-    def test_expansions_and_categories_without_printings_are_removed(self):
-        Expansion.objects.create(game=game(), code="old", name="Old CardTrader code")
-        Category.objects.create(game=game(), cm_id=99, name="Old category")
+    def test_unchanged_file_is_not_reimported(self):
         self.sync()
-        self.assertFalse(Expansion.objects.filter(code="old").exists())
-        self.assertFalse(Category.objects.filter(cm_id=99).exists())
+        Blueprint.objects.filter(cm_product_id=501201).update(name="Edited")
+        self.cm.guides[1]["priceGuides"][0]["trend"] = 2.5
+        self.files.reads.clear()
+        results = self.sync()
+        self.assertFalse(results["mtg"].imported)
+        self.assertEqual(Blueprint.objects.get(cm_product_id=501201).name, "Edited")
+        self.assertEqual(self.files.reads, [MANIFEST_KEY])  # no game file is downloaded again
+        self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend, Decimal("2.50"))  # prices still are
+        self.assertEqual((results["mtg"].expansions, results["mtg"].blueprints, results["mtg"].priced), (3, 7, 2))
+
+    def test_changed_file_is_reimported(self):
+        self.sync()
+        self.files.games["mtg"][3]["name"] = "Counterspell (Retro)"
+        results = self.sync()
+        self.assertTrue(results["mtg"].imported)
+        self.assertFalse(results["pokemon"].imported)
+        self.assertEqual(Blueprint.objects.get(cm_product_id=501201).name, "Counterspell (Retro)")
+        self.assertEqual(Blueprint.objects.count(), 9)
+
+    def test_prices_are_downloaded_for_every_game(self):
+        self.sync()
+        self.assertEqual(sorted(self.cm.urls), sorted([cardmarket.price_guide_url(1), cardmarket.price_guide_url(6)]))
+        self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend_foil, Decimal("3.50"))
+        self.assertEqual(CardmarketPrice.objects.get(pk=700001).trend, Decimal("2.50"))
+        self.assertEqual(CardmarketPrice.objects.get(pk=999999).trend, Decimal("9.00"))  # not in the catalog
+        self.assertEqual(CardmarketPrice.objects.get(pk=501201).prices_date.isoformat(), "2026-11-14T01:45:31+00:00")
+
+    def test_holo_prices_fill_foil_fields(self):
+        results = self.sync()
+        price = CardmarketPrice.objects.get(pk=700001)
+        self.assertEqual((price.trend_foil, price.avg_foil, price.low_foil, price.avg),
+                         (Decimal("9.50"), Decimal("8.00"), Decimal("6.00"), Decimal("2.00")))
+        self.assertEqual(results["pokemon"].priced, 1)
+
+    def test_category_is_single_from_name(self):
+        for name, single in [("Magic Single", True), ("Pokémon Single", True), ("YUGIOH SINGLES", True),
+                             ("Magic Display", False), ("Singles Lot", False), ("Pokémon Booster", False)]:
+            with self.subTest(name=name):
+                self.assertIs(catalog_sync.is_single_category(name), single)
+        self.sync()
+        self.assertTrue(Category.objects.get(game=game("pokemon"), cm_id=51).is_single)
+        self.assertFalse(Category.objects.get(game=game("pokemon"), cm_id=52).is_single)
+        self.assertTrue(Blueprint.objects.get(cm_product_id=700002).is_product)
+        self.assertTrue(Category.objects.get(game=game(), cm_id=1).is_single)
 
     def test_sync_twice_no_duplicates_prices_overwritten(self):
         self.sync()
-        self.cm.guide["priceGuides"][0]["trend"] = 2.5
+        self.cm.guides[1]["priceGuides"][0]["trend"] = 2.5
         self.sync()
-        self.assertEqual(Blueprint.objects.count(), 7)
+        self.assertEqual(Blueprint.objects.count(), 9)
         self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend, Decimal("2.50"))
 
     def test_sync_written_in_batches(self):
         with mock.patch.object(catalog_sync, "BATCH", 2):
             self.sync()
-        self.assertEqual(Blueprint.objects.count(), 7)
+        self.assertEqual(Blueprint.objects.count(), 9)
+        self.assertEqual(CardmarketPrice.objects.count(), 4)
 
-    def test_scryfall_failure_changes_nothing_and_logs_warning(self):
-        self.sf.fail_file = True
-        self.assertIsNone(self.run_sync())
-        self.assertFalse(Blueprint.objects.exists())
-        log = SyncLog.objects.latest("pk")
-        self.assertEqual(log.level, SyncLog.Level.WARNING)
-        self.assertIn("Catalog sync failed: Scryfall cards", log.message)
+    def test_corrupt_game_file_skips_only_that_game(self):
+        self.files.corrupt.add("pokemon")
+        results = self.sync()
+        self.assertIn("Invalid catalog file", results["pokemon"].error)
+        self.assertFalse(results["pokemon"].imported)
+        self.assertFalse(Blueprint.objects.filter(expansion__game=game("pokemon")).exists())
+        self.assertEqual(game("pokemon").catalog_sha256, "")
+        self.assertFalse(CardmarketPrice.objects.filter(pk=700001).exists())
+        self.assertEqual((results["mtg"].error, Blueprint.objects.filter(expansion__game=game()).count()), ("", 7))
 
-    def test_malformed_product_list_changes_nothing(self):
-        self.cm.raw_singles = b"{not json"
-        self.assertIsNone(self.run_sync())
-        self.assertFalse(Blueprint.objects.exists())
-        self.assertIn("Catalog sync failed: Cardmarket products", SyncLog.objects.latest("pk").message)
+    def test_price_guide_failure_leaves_that_game_unchanged(self):
+        self.cm.fail.add(6)
+        results = self.sync()
+        self.assertIn("Cardmarket price guide", results["pokemon"].error)
+        self.assertFalse(Blueprint.objects.filter(expansion__game=game("pokemon")).exists())
+        self.assertEqual(game("pokemon").catalog_sha256, "")  # imported on the next run
+        self.assertEqual(results["mtg"].error, "")
 
-    def test_unexpected_failure_is_logged_and_raised(self):
-        with mock.patch.object(catalog_sync, "_write", side_effect=RuntimeError("db down")):
-            with self.assertRaises(RuntimeError):
-                self.run_sync()
-        self.assertIn("RuntimeError: db down", SyncLog.objects.latest("pk").message)
+    def test_product_of_an_unknown_expansion_skips_that_game(self):
+        self.files.games["pokemon"].append(product(700003, "Eevee", "nope", "1", 51, "Pokémon Single"))
+        results = self.sync()
+        self.assertIn("nope", results["pokemon"].error)
+        self.assertFalse(Blueprint.objects.filter(expansion__game=game("pokemon")).exists())
 
-    def test_run_sync_logs_summary(self):
-        Card.objects.create(game=game(), name="Nowhere", set_code="ZZZ", collector_number="1")
-        self.run_sync()
-        log = SyncLog.objects.latest("pk")
-        self.assertEqual(log.level, SyncLog.Level.OK)
-        self.assertTrue(log.message.startswith("Catalog sync: 3 expansions, 7 printings, 2 priced (guide 2026-11-14)"),
-                        log.message)
-        self.assertIn("1 products without set", log.message)
-        self.assertIn("cards linked", log.message)
+    def test_game_missing_from_the_manifest_is_an_error(self):
+        results = self.sync()
+        self.assertIn("not in the catalog manifest", results["lorcana"].error)
+        self.assertEqual(list(results), sorted(Game.objects.values_list("slug", flat=True)))
 
 
 class PruneTest(CatalogSyncTestCase):
-    def old_blueprint(self, cm, **fields):
-        old = Expansion.objects.get_or_create(game=game(), code="ctold", defaults={"name": "Old CardTrader set"})[0]
+    def old_blueprint(self, cm, slug="mtg", **fields):
+        old = Expansion.objects.get_or_create(game=game(slug), code="ctold", defaults={"name": "Old set"})[0]
         return Blueprint.objects.create(cm_product_id=cm, expansion=old, name="Old lot", **fields)
 
-    def test_blueprints_no_longer_in_the_files_are_removed(self):
+    def test_blueprints_no_longer_in_the_file_are_removed(self):
         self.old_blueprint(888001)
-        self.sync()
+        results = self.sync()
+        self.assertEqual(results["mtg"].pruned, 1)
         self.assertFalse(Blueprint.objects.filter(cm_product_id=888001).exists())
         self.assertFalse(Expansion.objects.filter(code="ctold").exists())
 
-    def test_blueprint_of_an_open_scan_line_is_kept(self):
-        from .models import ScanLine, ScanSession
+    def test_prune_never_touches_another_game(self):
+        self.old_blueprint(888004, slug="yugioh")  # Yu-Gi-Oh! is not in the manifest
+        self.sync()
+        self.assertTrue(Blueprint.objects.filter(cm_product_id=888004).exists())
 
+    def test_blueprint_of_an_open_scan_line_is_kept(self):
         bp = self.old_blueprint(888002)
         session = ScanSession.objects.create(owner=self.user)
         ScanLine.objects.create(session=session, blueprint=bp, condition="NM", language="EN")
@@ -195,8 +287,6 @@ class PruneTest(CatalogSyncTestCase):
         self.assertTrue(Blueprint.objects.filter(cm_product_id=888002).exists())
 
     def test_saved_scan_line_keeps_its_history_without_the_blueprint(self):
-        from .models import ScanLine, ScanSession
-
         bp = self.old_blueprint(888003)
         session = ScanSession.objects.create(owner=self.user, status=ScanSession.Status.SAVED)
         line = ScanLine.objects.create(session=session, blueprint=bp, condition="NM", language="EN")
@@ -204,12 +294,92 @@ class PruneTest(CatalogSyncTestCase):
         line.refresh_from_db()
         self.assertIsNone(line.blueprint)
 
-    def test_suspiciously_small_download_prunes_nothing(self):
+    def test_suspiciously_small_file_prunes_nothing(self):
         for i in range(20):
-            self.old_blueprint(889000 + i)
-        result = self.sync()
+            self.old_blueprint(889000 + i, slug="pokemon")
+        self.old_blueprint(888005)
+        results = self.sync()
+        # Pokémon's file holds 2 printings out of 22: nothing goes. Magic's share is its own: 7 out of 8.
         self.assertEqual(Blueprint.objects.filter(cm_product_id__gte=889000).count(), 20)
-        self.assertFalse(result.pruned)
+        self.assertEqual(results["pokemon"].pruned, 0)
+        self.assertFalse(Blueprint.objects.filter(cm_product_id=888005).exists())
+
+    def test_empty_expansions_are_removed_only_in_that_game(self):
+        Expansion.objects.create(game=game(), code="old", name="Old Magic set")
+        Category.objects.create(game=game(), cm_id=99, name="Old Magic category")
+        Expansion.objects.create(game=game("yugioh"), code="old", name="Old Yu-Gi-Oh! set")
+        Category.objects.create(game=game("yugioh"), cm_id=99, name="Old Yu-Gi-Oh! category")
+        self.sync()
+        self.assertFalse(Expansion.objects.filter(game=game(), code="old").exists())
+        self.assertFalse(Category.objects.filter(game=game(), cm_id=99).exists())
+        self.assertTrue(Expansion.objects.filter(game=game("yugioh"), code="old").exists())
+        self.assertTrue(Category.objects.filter(game=game("yugioh"), cm_id=99).exists())
+
+
+class RunSyncTest(CatalogSyncTestCase):
+    def test_run_sync_logs_one_line_per_game(self):
+        Card.objects.create(game=game(), name="Nowhere", set_code="ZZZ", collector_number="1")
+        before = SyncLog.objects.count()
+        results = self.run_sync()
+        self.assertEqual([r.game for r in results], sorted(Game.objects.values_list("slug", flat=True)))
+        logs = {log.message.split(" catalog")[0]: log for log in SyncLog.objects.order_by("pk")[before:]}
+        self.assertEqual(len(logs), Game.objects.count())
+        magic = logs["Magic: The Gathering"]
+        self.assertEqual(magic.level, SyncLog.Level.OK)
+        self.assertTrue(magic.message.startswith(
+            "Magic: The Gathering catalog: 3 expansions, 7 printings, 2 priced (guide 2026-11-14)"), magic.message)
+        self.assertIn("cards linked", magic.message)
+        self.assertEqual(logs["Pokémon"].level, SyncLog.Level.OK)
+        self.assertEqual(logs["Disney Lorcana"].level, SyncLog.Level.WARNING)
+        self.assertIn("not in the catalog manifest", logs["Disney Lorcana"].message)
+
+    def test_unchanged_file_is_told_in_the_log(self):
+        self.run_sync()
+        self.run_sync()
+        message = SyncLog.objects.filter(message__startswith="Magic: The Gathering").latest("pk").message
+        self.assertIn("file unchanged", message)
+
+    def test_missing_bucket_logs_and_changes_nothing(self):
+        with override_settings(CARDLEDGER_CATALOG_BUCKET=""):
+            self.assertIsNone(catalog_sync.run_sync(cm_client=self.cm.client()))
+        log = SyncLog.objects.latest("pk")
+        self.assertEqual(log.level, SyncLog.Level.WARNING)
+        self.assertEqual(log.message, "Catalog sync failed: CARDLEDGER_CATALOG_BUCKET is not set")
+        self.assertFalse(Blueprint.objects.exists())
+        self.assertEqual(self.cm.urls, [])
+
+    def test_unusable_bucket_client_logs_and_changes_nothing(self):
+        for error in (NoRegionError(), ValueError("Invalid endpoint: nope")):
+            with self.subTest(error=error), \
+                    mock.patch.object(catalog_files.boto3, "client", side_effect=error):
+                self.assertIsNone(catalog_sync.run_sync(cm_client=self.cm.client()))
+                log = SyncLog.objects.latest("pk")
+                self.assertEqual(log.level, SyncLog.Level.WARNING)
+                self.assertTrue(log.message.startswith("Catalog sync failed: "), log.message)
+        self.assertFalse(Blueprint.objects.exists())
+
+    def test_unreadable_manifest_logs_and_changes_nothing(self):
+        self.files.manifest = {"format_version": 2, "games": {}}
+        self.assertIsNone(self.run_sync())
+        self.assertIn("Unsupported catalog format version", SyncLog.objects.latest("pk").message)
+        self.assertFalse(Blueprint.objects.exists())
+
+    def test_manifest_without_games_logs_and_changes_nothing(self):
+        for games in (None, [], "mtg"):
+            with self.subTest(games=games):
+                self.files.manifest = {"format_version": 1} if games is None else {"format_version": 1,
+                                                                                   "games": games}
+                self.assertIsNone(self.run_sync())
+                log = SyncLog.objects.latest("pk")
+                self.assertEqual((log.level, log.message),
+                                 (SyncLog.Level.WARNING, "Catalog sync failed: the catalog manifest has no games"))
+        self.assertFalse(Blueprint.objects.exists())
+
+    def test_unexpected_failure_is_logged_and_raised(self):
+        with mock.patch.object(catalog_sync, "_write", side_effect=RuntimeError("db down")):
+            with self.assertRaises(RuntimeError):
+                self.run_sync()
+        self.assertIn("RuntimeError: db down", SyncLog.objects.latest("pk").message)
 
 
 class ReconcileTest(CatalogSyncTestCase):
@@ -224,9 +394,16 @@ class ReconcileTest(CatalogSyncTestCase):
             Listing.objects.create(item=item, quantity=1, price=Decimal("1.00"), status=listing)
         return item
 
+    def test_sync_reconciles_the_cards(self):
+        card = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="045")
+        results = self.sync()
+        card.refresh_from_db()
+        self.assertEqual((card.cm_product_id, card.collector_number), (501201, "45"))
+        self.assertEqual(results["mtg"].reconciled.linked, 1)
+
     def test_existing_card_rewritten_to_catalog_code(self):
-        mat = Card.objects.create(game=game(), name="Dominaria United Playmat", set_code="DMU", collector_number="CT1391",
-                                  cm_product_id=501391)
+        mat = Card.objects.create(game=game(), name="Dominaria United Playmat", set_code="DMU",
+                                  collector_number="CT1391", cm_product_id=501391)
         token = Card.objects.create(game=game(), name="Soldier Token", set_code="DMR", collector_number="CT9999",
                                     cm_product_id=TOKEN)
         catalog.reconcile_cards()
@@ -236,7 +413,8 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertEqual((token.set_code, token.collector_number), ("TDMR", "1"))
 
     def test_rewrite_collision_merges_cards(self):
-        old = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="CT1201", cm_product_id=501201)
+        old = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="CT1201",
+                                  cm_product_id=501201)
         csv = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45")
         self.stack(old, 2)
         self.stack(csv, 3)
@@ -248,7 +426,8 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertFalse(Card.objects.filter(collector_number="CT1201").exists())
 
     def test_duplicate_product_with_live_listings_warns_owner(self):
-        first = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
+        first = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
+                                    cm_product_id=501201)
         second = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="CT1299",
                                      cm_product_id=501201)
         self.stack(first, listing=Listing.Status.PUBLISHED)
@@ -261,7 +440,8 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertIn("both have live listings", warning.message)
 
     def test_duplicate_product_without_listings_is_merged(self):
-        first = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
+        first = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
+                                    cm_product_id=501201)
         second = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="CT1299",
                                      cm_product_id=501201)
         self.stack(second, 2)
@@ -276,14 +456,16 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertEqual((card.cm_product_id, card.collector_number), (501201, "45"))
         self.assertGreaterEqual(result.linked, 1)
 
-    def test_single_without_scryfall_number_keeps_its_own(self):
-        card = Card.objects.create(game=game(), name="Brainstorm", set_code="2XM", collector_number="129", cm_product_id=UNMATCHED)
+    def test_single_without_number_keeps_its_own(self):
+        card = Card.objects.create(game=game(), name="Brainstorm", set_code="2XM", collector_number="129",
+                                   cm_product_id=UNMATCHED)
         catalog.reconcile_cards()
         card.refresh_from_db()
         self.assertEqual((card.set_code, card.collector_number), ("2XM", "129"))
 
     def test_duplicate_product_with_different_numbers_is_unlinked_not_merged(self):
-        base = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45", cm_product_id=501201)
+        base = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="45",
+                                   cm_product_id=501201)
         showcase = Card.objects.create(game=game(), name="Counterspell", set_code="DMR", collector_number="300",
                                        cm_product_id=501201)
         self.stack(showcase, 2)
@@ -294,7 +476,8 @@ class ReconcileTest(CatalogSyncTestCase):
         self.assertTrue(Card.objects.filter(pk=base.pk, cm_product_id=501201).exists())
 
     def test_card_with_unknown_product_stays_as_is(self):
-        card = Card.objects.create(game=game(), name="Gone", set_code="OLD", collector_number="CT1", cm_product_id=424242)
+        card = Card.objects.create(game=game(), name="Gone", set_code="OLD", collector_number="CT1",
+                                   cm_product_id=424242)
         result = catalog.reconcile_cards()
         card.refresh_from_db()
         self.assertEqual((card.set_code, card.collector_number), ("OLD", "CT1"))

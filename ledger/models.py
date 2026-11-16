@@ -62,6 +62,10 @@ class Game(models.Model):
     name = models.CharField(max_length=100)
     cm_id = models.PositiveIntegerField("Cardmarket game", unique=True, help_text="Cardmarket's idGame")
     ct_game_id = models.PositiveIntegerField("CardTrader game", null=True, blank=True)
+    catalog_sha256 = models.CharField(
+        max_length=64, blank=True, help_text="sha256 of the catalog file last imported (the sync skips the same file)",
+    )
+    catalog_generated_at = models.DateTimeField(null=True, blank=True, help_text="When that file was generated")
 
     class Meta:
         ordering = ["name"]

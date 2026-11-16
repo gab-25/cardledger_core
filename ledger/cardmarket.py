@@ -1,10 +1,9 @@
-"""Cardmarket's public files: the product lists the catalog is built from, and the daily price guide.
+"""Cardmarket's daily price guide of each game, and the price lookups of the Ledger's cards.
 
-A catalog blueprint is a Cardmarket product, so its id is the row of the price guide. Both are downloaded by the
-nightly catalog sync (ledger/catalog_sync.py).
+A catalog blueprint is a Cardmarket product, so its id is the row of the price guide. The guides are downloaded by
+the nightly catalog sync (ledger/catalog_sync.py).
 """
 
-from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
@@ -13,14 +12,11 @@ import httpx
 from .catalog import blueprint_of, normalize_number
 from .models import Blueprint, Card, CardmarketPrice
 
-PRICE_GUIDE_URL = "https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_1.json"
-PRODUCT_LIST_URLS = (
-    "https://downloads.s3.cardmarket.com/productCatalog/productList/products_singles_1.json",
-    "https://downloads.s3.cardmarket.com/productCatalog/productList/products_nonsingles_1.json",
-)
+PRICE_GUIDE_URL = "https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_{}.json"
 USER_AGENT = "cardledger/0.1"
 
-# Price guide key -> CardmarketPrice field
+# Price guide key -> CardmarketPrice field. The finish keys are "-foil" in most games and "-holo" in Pokémon's guide:
+# both fill the *_foil fields.
 PRICE_FIELDS = {
     "low": "low", "trend": "trend", "avg": "avg", "avg1": "avg1", "avg7": "avg7", "avg30": "avg30",
     "low-foil": "low_foil", "trend-foil": "trend_foil", "avg-foil": "avg_foil",
@@ -30,17 +26,6 @@ PRICE_FIELDS = {
 
 class CardmarketError(Exception):
     pass
-
-
-@dataclass(frozen=True)
-class CmProduct:
-    """A row of Cardmarket's product lists: a single card, a sealed product or an accessory."""
-
-    id_product: int
-    name: str
-    id_category: int
-    category_name: str
-    id_expansion: int
 
 
 def make_client(transport=None):
@@ -101,40 +86,37 @@ def _money(value):
     return None if value is None else Decimal(str(value))
 
 
-def fetch_guide(client):
-    """({idProduct: raw values in PRICE_FIELDS order}, createdAt) from today's price guide.
+def price_guide_url(cm_game_id):
+    """The URL of the price guide of a game, by Cardmarket's idGame."""
+    return PRICE_GUIDE_URL.format(cm_game_id)
+
+
+FOIL_KEYS = tuple(PRICE_FIELDS)
+HOLO_KEYS = tuple(key.removesuffix("-foil") + "-holo" if key.endswith("-foil") else key for key in PRICE_FIELDS)
+
+
+def _values(row):
+    """The raw values of a guide row in PRICE_FIELDS order, the finish read from "-holo" keys when it has them."""
+    keys = HOLO_KEYS if any(key.endswith("-holo") for key in row) else FOIL_KEYS
+    return tuple(row.get(key) for key in keys)
+
+
+def fetch_guide(client, cm_game_id):
+    """({idProduct: raw values in PRICE_FIELDS order}, createdAt) from today's price guide of a game.
 
     The values stay as parsed from the JSON: the guide has over 100k rows, and models with a Decimal per field
     would cost hundreds of MB on the worker. price_row() builds the model when it is written.
     """
     try:
-        response = client.get(PRICE_GUIDE_URL)
+        response = client.get(price_guide_url(cm_game_id))
         response.raise_for_status()
         guide = response.json()
         del response
         guide_date = datetime.strptime(guide["createdAt"], "%Y-%m-%dT%H:%M:%S%z")
-        prices = {row["idProduct"]: tuple(row.get(key) for key in PRICE_FIELDS) for row in guide["priceGuides"]}
+        prices = {row["idProduct"]: _values(row) for row in guide["priceGuides"]}
     except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise CardmarketError(f"Cardmarket price guide: {type(exc).__name__}: {exc}") from exc
     return prices, guide_date
-
-
-def fetch_products(client):
-    """[CmProduct] of every MTG single and non-single in Cardmarket's public product lists."""
-    products = []
-    try:
-        for url in PRODUCT_LIST_URLS:
-            response = client.get(url)
-            response.raise_for_status()
-            for p in response.json()["products"]:
-                products.append(CmProduct(
-                    int(p["idProduct"]), p["name"], int(p["idCategory"]), p.get("categoryName") or "",
-                    int(p["idExpansion"]),
-                ))
-            del response
-    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
-        raise CardmarketError(f"Cardmarket products: {type(exc).__name__}: {exc}") from exc
-    return products
 
 
 def price_row(id_product, values, guide_date):
