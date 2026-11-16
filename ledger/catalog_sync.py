@@ -4,6 +4,9 @@ cardledger_database generates one file per game (expansions and Cardmarket produ
 rarity and images) and a manifest with their checksums (ledger/catalog_files.py); a game's file is imported only when
 its checksum changed. Cardmarket's public price guide of each game gives the prices, every night. Then the Ledger's
 cards of that game are aligned with the catalog (catalog.reconcile_cards). One SyncLog line per game.
+
+A game whose file cannot be read (no bucket, bad manifest, corrupt file) keeps its catalog but still gets its prices
+when it has a catalog; a game that fails for any other reason is rolled back without stopping the others.
 """
 
 import logging
@@ -41,7 +44,8 @@ class GameResult:
     pruned: int
     reconciled: catalog.ReconcileResult
     guide_date: datetime | None
-    error: str = ""
+    error: str = ""  # with guide_date set: the catalog was not updated, the prices were
+    unexpected: bool = False  # error is a bug or a database failure, not a file or Cardmarket problem
 
 
 def is_single_category(name):
@@ -50,8 +54,10 @@ def is_single_category(name):
 
 
 def _check(file):
-    """Refuse a game file that cannot be written: a product of an unknown expansion, a set code too long."""
+    """Refuse a game file that cannot be written: a product of an unknown expansion, a set code missing or too long."""
     codes = {e.code for e in file.expansions}
+    if not all(isinstance(c, str) and c for c in codes):
+        raise CatalogSyncError("expansions without a set code")
     too_long = sorted(c for c in codes if len(c) > Expansion._meta.get_field("code").max_length)
     if too_long:
         raise CatalogSyncError(f"set codes too long: {', '.join(too_long[:5])}")
@@ -71,32 +77,42 @@ def _prune(game, written):
     return stale.delete()[1].get("ledger.Blueprint", 0)
 
 
+def _text(value, field):
+    """A text field of the file as the model can hold it: missing becomes empty, too long is cut."""
+    return str(value or "")[:field.max_length]
+
+
 def _import(game, file):
     """Write game's file: its expansions, categories and blueprints; then its stale blueprints and its emptied
     expansions and categories go. Returns how many blueprints were pruned."""
     products = {p.id_product: p for p in file.products}  # a product listed twice would fail the batch
     prune = len(products) >= PRUNE_MIN_SHARE * Blueprint.objects.filter(expansion__game=game).count()
     expansions = {e.code: e for e in file.expansions}
+    field = Expansion._meta.get_field
     Expansion.objects.bulk_create(
-        [Expansion(game=game, code=e.code, name=e.name[:200], released_at=e.released_at,
-                   language=(e.language or "")[:5]) for e in expansions.values()],
+        [Expansion(game=game, code=e.code, name=_text(e.name, field("name")), released_at=e.released_at,
+                   language=_text(e.language, field("language"))) for e in expansions.values()],
         update_conflicts=True, unique_fields=["game", "code"], update_fields=["name", "released_at", "language"],
     )
     categories = {p.category_id: p.category_name for p in products.values()}
     Category.objects.bulk_create(
-        [Category(game=game, cm_id=i, name=name[:100], is_single=is_single_category(name))
-         for i, name in categories.items()],
+        [Category(game=game, cm_id=i, name=_text(name, Category._meta.get_field("name")),
+                  is_single=is_single_category(name or "")) for i, name in categories.items()],
         update_conflicts=True, unique_fields=["game", "cm_id"], update_fields=["name", "is_single"],
     )
     expansion_pk = dict(Expansion.objects.filter(game=game).values_list("code", "pk"))
     category_pk = dict(Category.objects.filter(game=game).values_list("cm_id", "pk"))
+    field = Blueprint._meta.get_field
     # Models are built and written one batch at a time: all of them at once do not fit in the worker.
     for chunk in batched(products.values(), BATCH):
         Blueprint.objects.bulk_create(
             [
-                Blueprint(cm_product_id=p.id_product, name=p.name[:200], expansion_id=expansion_pk[p.expansion_code],
-                          collector_number=p.number[:40], rarity=p.rarity[:40], image_url=p.image_url,
-                          image_large_url=p.image_large_url, category_id=category_pk[p.category_id])
+                Blueprint(cm_product_id=p.id_product, name=_text(p.name, field("name")),
+                          expansion_id=expansion_pk[p.expansion_code],
+                          collector_number=_text(p.number, field("collector_number")),
+                          rarity=_text(p.rarity, field("rarity")), image_url=_text(p.image_url, field("image_url")),
+                          image_large_url=_text(p.image_large_url, field("image_large_url")),
+                          category_id=category_pk[p.category_id])
                 for p in chunk
             ],
             update_conflicts=True, unique_fields=["cm_product"],
@@ -118,64 +134,103 @@ def _import(game, file):
 
 
 def _write(game, file, prices, guide_date):
-    """Write game's file (None: unchanged) and its prices in one transaction. Returns how many blueprints went."""
-    with transaction.atomic():
-        pruned = _import(game, file) if file is not None else 0
-        for chunk in batched(prices.items(), BATCH):
-            CardmarketPrice.objects.bulk_create(
-                [cardmarket.price_row(id_product, values, guide_date) for id_product, values in chunk],
-                update_conflicts=True, unique_fields=["id_product"],
-                update_fields=[*PRICE_FIELDS.values(), "prices_date"],
-            )
+    """Write game's file (None: unchanged) and its prices. Returns how many blueprints went."""
+    pruned = _import(game, file) if file is not None else 0
+    for chunk in batched(prices.items(), BATCH):
+        CardmarketPrice.objects.bulk_create(
+            [cardmarket.price_row(id_product, values, guide_date) for id_product, values in chunk],
+            update_conflicts=True, unique_fields=["id_product"],
+            update_fields=[*PRICE_FIELDS.values(), "prices_date"],
+        )
     return pruned
 
 
-def _sync_game(bucket, cm_client, game, entry):
+def _failure(game, error, unexpected=False):
+    return GameResult(game=game.slug, imported=False, expansions=0, blueprints=0, priced=0, pruned=0,
+                      reconciled=catalog.ReconcileResult(), guide_date=None, error=error, unexpected=unexpected)
+
+
+def _game_file(bucket, game, entry):
+    """game's file when it changed (None: unchanged), checked."""
+    if not isinstance(entry, dict):
+        raise CatalogSyncError("not in the catalog manifest" if entry is None else "invalid manifest entry")
+    if game.catalog_sha256 and entry.get("sha256") == game.catalog_sha256:
+        return None
+    file = bucket.game_file(game.slug, entry)
+    _check(file)
+    return file
+
+
+def _sync_game(bucket, cm_client, game, entry, problem=""):
     """Import game's file when it changed and its prices, then align its cards. Everything is downloaded before
-    anything is written: a file or guide that cannot be read leaves the game's catalog as it was."""
+    anything is written, and written in one transaction. A file that cannot be read (or the problem that kept the
+    whole catalog from being read) leaves the game's catalog as it was, but a game that has one still gets its
+    prices; a price guide that cannot be read leaves the game as it was."""
     try:
-        if not isinstance(entry, dict):
-            raise CatalogSyncError("not in the catalog manifest" if entry is None else "invalid manifest entry")
-        file = None
-        if not game.catalog_sha256 or entry.get("sha256") != game.catalog_sha256:
-            file = bucket.game_file(game.slug, entry)
-            _check(file)
-        prices, guide_date = cardmarket.fetch_guide(cm_client, game.cm_id)
-    except (CatalogSyncError, CatalogFilesError, CardmarketError) as exc:
-        return GameResult(game=game.slug, imported=False, expansions=0, blueprints=0, priced=0, pruned=0,
-                          reconciled=catalog.ReconcileResult(), guide_date=None, error=str(exc))
-    imported = file is not None
-    pruned = _write(game, file, prices, guide_date)
-    del file
-    blueprints = priced = 0
-    for cm in Blueprint.objects.filter(expansion__game=game).values_list("cm_product_id", flat=True):
-        blueprints += 1
-        priced += cm in prices
-    return GameResult(
-        game=game.slug, imported=imported, expansions=Expansion.objects.filter(game=game).count(),
-        blueprints=blueprints, priced=priced, pruned=pruned, reconciled=catalog.reconcile_cards(game),
-        guide_date=guide_date,
-    )
+        file, error = None, problem
+        if not error:
+            try:
+                file = _game_file(bucket, game, entry)
+            except (CatalogSyncError, CatalogFilesError) as exc:
+                error = str(exc)
+        if error and not Expansion.objects.filter(game=game).exists():
+            return _failure(game, error)
+        try:
+            prices, guide_date = cardmarket.fetch_guide(cm_client, game.cm_id)
+        except CardmarketError as exc:
+            return _failure(game, f"{error}; {exc}" if error else str(exc))
+        with transaction.atomic():
+            imported = file is not None
+            pruned = _write(game, file, prices, guide_date)
+            del file
+            blueprints = priced = 0
+            for cm in Blueprint.objects.filter(expansion__game=game).values_list("cm_product_id", flat=True):
+                blueprints += 1
+                priced += cm in prices
+            return GameResult(
+                game=game.slug, imported=imported, expansions=Expansion.objects.filter(game=game).count(),
+                blueprints=blueprints, priced=priced, pruned=pruned, reconciled=catalog.reconcile_cards(game),
+                guide_date=guide_date, error=error,
+            )
+    except Exception as exc:
+        # A bug or a database failure: this game is rolled back, the others still run.
+        logger.exception("Catalog sync of %s failed", game.slug)
+        return _failure(game, f"{type(exc).__name__}: {exc}", unexpected=True)
 
 
-def sync(bucket, cm_client):
-    """Sync every game, in slug order; a game that fails is told in its result and does not stop the others."""
-    games = bucket.manifest().get("games")
-    if not isinstance(games, dict):
-        raise CatalogSyncError("the catalog manifest has no games")
-    return [_sync_game(bucket, cm_client, game, games.get(game.slug)) for game in Game.objects.order_by("slug")]
+def sync(bucket, cm_client, problem=""):
+    """Sync every game, in slug order; a game that fails is told in its result and does not stop the others.
+
+    bucket None (or a problem) means the catalog files cannot be read: only the prices of the games that have a
+    catalog are updated, and every result carries the problem."""
+    games = {}
+    if not problem and bucket is None:
+        problem = "no catalog bucket"
+    if not problem:
+        try:
+            games = bucket.manifest().get("games")
+            if not isinstance(games, dict):
+                raise CatalogSyncError("the catalog manifest has no games")
+        except (CatalogSyncError, CatalogFilesError) as exc:
+            problem, games = str(exc), {}
+    return [_sync_game(bucket, cm_client, game, games.get(game.slug), problem)
+            for game in Game.objects.order_by("slug")]
 
 
 def _summary(name, result):
-    if result.error:
+    if result.error and result.guide_date is None:
         return f"{name} catalog sync failed: {result.error}"
     r = result.reconciled
-    message = (
-        f"{name} catalog: {result.expansions} expansions, {result.blueprints} printings, {result.priced} priced "
-        f"(guide {result.guide_date:%Y-%m-%d}), {r.linked} cards linked, {r.unlinked} not linked"
+    counts = (
+        f"{result.blueprints} printings, {result.priced} priced (guide {result.guide_date:%Y-%m-%d}), "
+        f"{r.linked} cards linked, {r.unlinked} not linked"
     )
-    if not result.imported:
-        message += ", file unchanged"
+    if result.error:
+        message = f"{name} catalog not updated ({result.error}), prices updated: {counts}"
+    else:
+        message = f"{name} catalog: {result.expansions} expansions, {counts}"
+        if not result.imported:
+            message += ", file unchanged"
     if result.pruned:
         message += f", {result.pruned} printings removed"
     if r.clashes:
@@ -183,29 +238,25 @@ def _summary(name, result):
     return message
 
 
-def _failed(exc):
-    SyncLog.objects.create(message=f"Catalog sync failed: {exc}"[:300], level=SyncLog.Level.WARNING)
-
-
 def run_sync(bucket=None, cm_client=None):
-    """sync() with its outcome written to the SyncLog, one line per game. Returns the results, or None when it could
-    not run (no bucket, unreadable manifest)."""
+    """sync() with its outcome written to the SyncLog, one line per game. Returns the results.
+
+    Without a usable bucket the prices are still updated. Raises CatalogSyncError, after logging every game, when
+    a game failed unexpectedly, so the task is marked failed."""
+    problem = ""
     try:
         bucket = bucket if bucket is not None else CatalogBucket()
     except (CatalogFilesError, BotoCoreError, ValueError) as exc:  # not configured, no region, bad endpoint
-        _failed(exc)
-        return None
+        bucket, problem = None, str(exc)
     own_cm = cm_client is None
     cm_client = cm_client or cardmarket.make_client()
     try:
-        results = sync(bucket, cm_client)
-    except (CatalogSyncError, CatalogFilesError) as exc:
-        _failed(exc)
-        return None
+        results = sync(bucket, cm_client, problem)
     except Exception as exc:
         # Unexpected (database, bug): still visible in the Activity log, and the task is marked failed.
         logger.exception("Catalog sync failed")
-        _failed(f"{type(exc).__name__}: {exc}")
+        SyncLog.objects.create(message=f"Catalog sync failed: {type(exc).__name__}: {exc}"[:300],
+                               level=SyncLog.Level.WARNING)
         raise
     finally:
         if own_cm:
@@ -215,4 +266,7 @@ def run_sync(bucket=None, cm_client=None):
         warn = result.error or result.reconciled.clashes
         SyncLog.objects.create(message=_summary(names[result.game], result)[:300],
                                level=SyncLog.Level.WARNING if warn else SyncLog.Level.OK)
+    failed = [r.game for r in results if r.unexpected]
+    if failed:
+        raise CatalogSyncError(f"unexpected failure in: {', '.join(failed)}")
     return results

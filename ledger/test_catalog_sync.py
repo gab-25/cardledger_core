@@ -19,7 +19,7 @@ from .models import (
     Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, Listing, ScanLine, ScanSession,
     SyncLog,
 )
-from .tests import LedgerTestCase, game
+from .tests import LedgerTestCase, game, load_catalog
 
 BUCKET = "test-catalog"
 TOKEN, UNMATCHED = 501250, 501203
@@ -59,6 +59,13 @@ MAGIC_GUIDE = {"version": 1, "createdAt": "2026-11-14T02:45:31+0100", "priceGuid
     {"idProduct": 501201, "trend": 1.2, "trend-foil": 3.5},
     {"idProduct": 501390, "trend": 150.0},
     {"idProduct": 999999, "trend": 9.0},  # a product the catalog does not hold
+]}
+LORCANA = [
+    expansion("tfc", "The First Chapter", "2023-08-18"),
+    product(800001, "Mickey Mouse", "tfc", "1", 1601, "Lorcana Single", "Rare", "mickey"),
+]
+LORCANA_GUIDE = {"version": 1, "createdAt": "2026-11-14T02:55:00+0100", "priceGuides": [
+    {"idProduct": 800001, "trend": 4.0},
 ]}
 POKEMON_GUIDE = {"version": 1, "createdAt": "2026-11-14T02:50:00+0100", "priceGuides": [
     {"idProduct": 700001, "trend": 2.5, "avg": 2.0, "trend-holo": 9.5, "avg-holo": 8.0, "low-holo": 6.0},
@@ -261,6 +268,72 @@ class SyncTest(CatalogSyncTestCase):
         self.assertIn("not in the catalog manifest", results["lorcana"].error)
         self.assertEqual(list(results), sorted(Game.objects.values_list("slug", flat=True)))
 
+    def with_lorcana(self):
+        self.files.games["lorcana"] = copy.deepcopy(LORCANA)
+        self.cm.guides[game("lorcana").cm_id] = copy.deepcopy(LORCANA_GUIDE)
+
+    def test_unexpected_error_in_one_game_does_not_stop_the_others(self):
+        self.with_lorcana()
+        real_import = catalog_sync._import
+
+        def failing_import(g, file):
+            real_import(g, file)  # written, then rolled back
+            if g.slug == "lorcana":
+                raise RuntimeError("boom")
+            return 0
+
+        with mock.patch.object(catalog_sync, "_import", side_effect=failing_import):
+            results = self.sync()
+        self.assertEqual(results["lorcana"].error, "RuntimeError: boom")
+        self.assertTrue(results["lorcana"].unexpected)
+        self.assertFalse(Expansion.objects.filter(game=game("lorcana")).exists())
+        self.assertFalse(CardmarketPrice.objects.filter(pk=800001).exists())
+        self.assertEqual(game("lorcana").catalog_sha256, "")
+        # Magic and Pokémon come after Lorcana in slug order: still imported and priced.
+        self.assertEqual((results["mtg"].error, results["mtg"].imported, results["mtg"].priced), ("", True, 2))
+        self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend, Decimal("1.20"))
+        self.assertEqual(results["pokemon"].error, "")
+
+    def test_missing_and_oversize_fields_are_written(self):
+        self.files.games["mtg"][3].update(name=None, number=None, rarity=None, image_url="https://img/" + "x" * 600,
+                                          image_large_url=None, category_name=None)
+        self.files.games["mtg"][0].update(name=None, language=None)
+        results = self.sync()
+        self.assertEqual(results["mtg"].error, "")
+        bp = Blueprint.objects.get(cm_product_id=501201)
+        self.assertEqual((bp.name, bp.collector_number, bp.rarity, bp.image_large_url), ("", "", "", ""))
+        self.assertEqual(len(bp.image_url), 500)
+        self.assertEqual(Expansion.objects.get(game=game(), code="dmr").name, "")
+
+    def test_expansion_without_code_skips_that_game(self):
+        self.files.games["pokemon"].append(expansion(None, "No code", None))
+        results = self.sync()
+        self.assertIn("expansions without a set code", results["pokemon"].error)
+        self.assertEqual(results["mtg"].error, "")
+
+    def test_corrupt_file_of_an_existing_catalog_still_updates_its_prices(self):
+        self.sync()
+        sha = game("pokemon").catalog_sha256
+        self.files.games["pokemon"][2]["name"] = "Pikachu (new)"
+        self.files.corrupt.add("pokemon")
+        self.cm.guides[6]["priceGuides"][0]["trend"] = 3.0
+        results = self.sync()
+        pokemon = results["pokemon"]
+        self.assertIn("Invalid catalog file", pokemon.error)
+        self.assertEqual((pokemon.imported, pokemon.blueprints, pokemon.priced), (False, 2, 1))
+        self.assertEqual(CardmarketPrice.objects.get(pk=700001).trend, Decimal("3.00"))
+        self.assertEqual(Blueprint.objects.get(cm_product_id=700001).name, "Pikachu")
+        self.assertEqual(game("pokemon").catalog_sha256, sha)
+
+    def test_game_missing_from_the_manifest_with_a_catalog_still_updates_its_prices(self):
+        self.sync()
+        del self.files.games["pokemon"]
+        self.cm.guides[6]["priceGuides"][0]["trend"] = 3.0
+        results = self.sync()
+        self.assertIn("not in the catalog manifest", results["pokemon"].error)
+        self.assertEqual(CardmarketPrice.objects.get(pk=700001).trend, Decimal("3.00"))
+        self.assertEqual(Blueprint.objects.filter(expansion__game=game("pokemon")).count(), 2)
+
 
 class PruneTest(CatalogSyncTestCase):
     def old_blueprint(self, cm, slug="mtg", **fields):
@@ -339,28 +412,63 @@ class RunSyncTest(CatalogSyncTestCase):
         message = SyncLog.objects.filter(message__startswith="Magic: The Gathering").latest("pk").message
         self.assertIn("file unchanged", message)
 
+    def game_logs(self, before):
+        return {log.message.split(" catalog")[0]: log for log in SyncLog.objects.order_by("pk")[before:]}
+
     def test_missing_bucket_logs_and_changes_nothing(self):
+        before = SyncLog.objects.count()
         with override_settings(CARDLEDGER_CATALOG_BUCKET=""):
-            self.assertIsNone(catalog_sync.run_sync(cm_client=self.cm.client()))
-        log = SyncLog.objects.latest("pk")
-        self.assertEqual(log.level, SyncLog.Level.WARNING)
-        self.assertEqual(log.message, "Catalog sync failed: CARDLEDGER_CATALOG_BUCKET is not set")
+            catalog_sync.run_sync(cm_client=self.cm.client())
+        logs = self.game_logs(before)
+        self.assertEqual(len(logs), Game.objects.count())
+        for log in logs.values():
+            self.assertEqual(log.level, SyncLog.Level.WARNING)
+            self.assertIn("CARDLEDGER_CATALOG_BUCKET is not set", log.message)
         self.assertFalse(Blueprint.objects.exists())
-        self.assertEqual(self.cm.urls, [])
+        self.assertEqual(self.cm.urls, [])  # no game has a catalog to price
+
+    def test_missing_bucket_still_updates_prices_of_existing_catalogs(self):
+        load_catalog()
+        blueprints = set(Blueprint.objects.values_list("cm_product_id", "name", "collector_number"))
+        before = SyncLog.objects.count()
+        with override_settings(CARDLEDGER_CATALOG_BUCKET=""):
+            results = {r.game: r for r in catalog_sync.run_sync(cm_client=self.cm.client())}
+        self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend, Decimal("1.20"))
+        self.assertEqual(results["mtg"].priced, 2)
+        self.assertEqual(self.cm.urls, [cardmarket.price_guide_url(1)])  # only Magic has a catalog
+        self.assertEqual(set(Blueprint.objects.values_list("cm_product_id", "name", "collector_number")), blueprints)
+        self.assertEqual(game().catalog_sha256, "")
+        magic = self.game_logs(before)["Magic: The Gathering"]
+        self.assertEqual(magic.level, SyncLog.Level.WARNING)
+        self.assertIn("CARDLEDGER_CATALOG_BUCKET is not set", magic.message)
+        self.assertIn("2 priced (guide 2026-11-14)", magic.message)
 
     def test_unusable_bucket_client_logs_and_changes_nothing(self):
         for error in (NoRegionError(), ValueError("Invalid endpoint: nope")):
             with self.subTest(error=error), \
                     mock.patch.object(catalog_files.boto3, "client", side_effect=error):
-                self.assertIsNone(catalog_sync.run_sync(cm_client=self.cm.client()))
+                catalog_sync.run_sync(cm_client=self.cm.client())
                 log = SyncLog.objects.latest("pk")
                 self.assertEqual(log.level, SyncLog.Level.WARNING)
-                self.assertTrue(log.message.startswith("Catalog sync failed: "), log.message)
+                self.assertIn("catalog sync failed: ", log.message)
         self.assertFalse(Blueprint.objects.exists())
+
+    def test_unreadable_manifest_still_updates_prices_of_existing_catalogs(self):
+        self.run_sync()
+        self.cm.guides[1]["priceGuides"][0]["trend"] = 2.5
+        self.files.games["mtg"][3]["name"] = "Counterspell (Retro)"
+        self.files.manifest = {"format_version": 2, "games": {}}
+        before = SyncLog.objects.count()
+        self.run_sync()
+        logs = self.game_logs(before)
+        self.assertIn("Unsupported catalog format version", logs["Magic: The Gathering"].message)
+        self.assertEqual(logs["Magic: The Gathering"].level, SyncLog.Level.WARNING)
+        self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend, Decimal("2.50"))
+        self.assertEqual(Blueprint.objects.get(cm_product_id=501201).name, "Counterspell")
 
     def test_unreadable_manifest_logs_and_changes_nothing(self):
         self.files.manifest = {"format_version": 2, "games": {}}
-        self.assertIsNone(self.run_sync())
+        self.run_sync()
         self.assertIn("Unsupported catalog format version", SyncLog.objects.latest("pk").message)
         self.assertFalse(Blueprint.objects.exists())
 
@@ -369,14 +477,36 @@ class RunSyncTest(CatalogSyncTestCase):
             with self.subTest(games=games):
                 self.files.manifest = {"format_version": 1} if games is None else {"format_version": 1,
                                                                                    "games": games}
-                self.assertIsNone(self.run_sync())
+                self.run_sync()
                 log = SyncLog.objects.latest("pk")
-                self.assertEqual((log.level, log.message),
-                                 (SyncLog.Level.WARNING, "Catalog sync failed: the catalog manifest has no games"))
+                self.assertEqual(log.level, SyncLog.Level.WARNING)
+                self.assertTrue(log.message.endswith("catalog sync failed: the catalog manifest has no games"),
+                                log.message)
         self.assertFalse(Blueprint.objects.exists())
 
-    def test_unexpected_failure_is_logged_and_raised(self):
-        with mock.patch.object(catalog_sync, "_write", side_effect=RuntimeError("db down")):
+    def test_unexpected_failure_of_one_game_logs_every_game_and_raises(self):
+        self.files.games["lorcana"] = copy.deepcopy(LORCANA)
+        self.cm.guides[game("lorcana").cm_id] = copy.deepcopy(LORCANA_GUIDE)
+        real_write = catalog_sync._write
+
+        def failing_write(g, file, prices, guide_date):
+            if g.slug == "lorcana":
+                raise RuntimeError("db down")
+            return real_write(g, file, prices, guide_date)
+
+        before = SyncLog.objects.count()
+        with mock.patch.object(catalog_sync, "_write", side_effect=failing_write):
+            with self.assertRaises(catalog_sync.CatalogSyncError):  # the task is marked failed
+                self.run_sync()
+        logs = self.game_logs(before)
+        self.assertEqual(len(logs), Game.objects.count())
+        self.assertEqual(logs["Disney Lorcana"].level, SyncLog.Level.WARNING)
+        self.assertIn("RuntimeError: db down", logs["Disney Lorcana"].message)
+        self.assertEqual(logs["Magic: The Gathering"].level, SyncLog.Level.OK)
+        self.assertEqual(Blueprint.objects.filter(expansion__game=game()).count(), 7)
+
+    def test_unexpected_global_failure_is_logged_and_raised(self):
+        with mock.patch.object(catalog_sync.Game.objects, "order_by", side_effect=RuntimeError("db down")):
             with self.assertRaises(RuntimeError):
                 self.run_sync()
         self.assertIn("RuntimeError: db down", SyncLog.objects.latest("pk").message)
