@@ -11,7 +11,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from ..models import Blueprint, Condition, Expansion, Language, ScanLine, ScanSession
+from ..models import MAGIC, Blueprint, Condition, Expansion, Language, ScanLine, ScanSession
 from ..recognition import same_name
 from . import pages
 
@@ -234,7 +234,7 @@ class SaveResultSerializer(serializers.Serializer):
 
 class SessionCreateSerializer(serializers.Serializer):
     expansion_id = serializers.PrimaryKeyRelatedField(
-        queryset=Expansion.objects.all(), allow_null=True, required=False, default=None,
+        queryset=Expansion.objects.filter(game__slug=MAGIC), allow_null=True, required=False, default=None,
         help_text="The expansion to scan; null for all expansions",
     )
     condition = serializers.ChoiceField(Condition.choices, default=Condition.NEAR_MINT,
@@ -260,7 +260,8 @@ class SearchQuerySerializer(serializers.Serializer):
 
 class PickSerializer(serializers.Serializer):
     blueprint_id = serializers.SlugRelatedField(
-        slug_field="cm_product_id", queryset=Blueprint.objects.select_related("expansion"),
+        slug_field="cm_product_id",  # scanning is Magic only, until a scan session has its own game
+        queryset=Blueprint.objects.select_related("expansion").filter(expansion__game__slug=MAGIC),
         help_text="Cardmarket product id",
     )
     language = LanguageField()

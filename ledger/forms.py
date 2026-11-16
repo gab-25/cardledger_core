@@ -3,12 +3,11 @@ from django.db.models import F
 from django.db.models.functions import Now
 
 from . import catalog
-from .models import MAGIC, Blueprint, Card, CollectionItem, Condition, Game, Language, Listing
+from .models import Blueprint, Card, CollectionItem, Condition, Language, Listing
 
 
-def get_or_create_card(name, set_code, collector_number="", **defaults):
-    """The Magic printing (set + collector number) when the number is known, else the legacy name + set row."""
-    game = Game.by_slug(MAGIC)
+def get_or_create_card(game, name, set_code, collector_number="", **defaults):
+    """The game's printing (set + collector number) when the number is known, else the legacy name + set row."""
     if collector_number:
         card, _ = Card.objects.get_or_create(
             game=game, set_code=set_code, collector_number=collector_number, defaults={"name": name, **defaults}

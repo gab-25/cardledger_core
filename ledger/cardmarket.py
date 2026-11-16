@@ -69,20 +69,21 @@ def suggested_price(card, foil):
     return trend or None  # the guide holds 0.00 for a finish that doesn't exist
 
 
-def owned_quantities(owner):
-    """{Cardmarket product id: copies in owner's collection}, matching cards like blueprint_for()."""
+def owned_quantities(owner, game):
+    """{Cardmarket product id: copies of game's cards in owner's collection}, matching cards like blueprint_for()."""
     from django.db.models import Q, Sum
 
     per_card = list(
-        Card.objects.annotate(qty=Sum("items__quantity", filter=Q(items__owner=owner))).filter(qty__gt=0)
-        .values_list("cm_product_id", "set_code", "collector_number", "qty")
+        Card.objects.filter(game=game).annotate(qty=Sum("items__quantity", filter=Q(items__owner=owner)))
+        .filter(qty__gt=0).values_list("cm_product_id", "set_code", "collector_number", "qty")
     )
-    known = set(Blueprint.objects.filter(cm_product_id__in=[c[0] for c in per_card if c[0]])
+    printings = Blueprint.objects.filter(expansion__game=game)
+    known = set(printings.filter(cm_product_id__in=[c[0] for c in per_card if c[0]])
                 .values_list("cm_product_id", flat=True))
     wanted = {(s.lower(), normalize_number(n)) for cm, s, n, _ in per_card if cm not in known and normalize_number(n)}
     by_printing = {}
     if wanted:
-        rows = Blueprint.objects.filter(
+        rows = printings.filter(
             expansion__code__in={s for s, _ in wanted}, collector_number__in={n for _, n in wanted}
         ).order_by("-cm_product_id").values_list("expansion__code", "collector_number", "cm_product_id")
         by_printing = {(s, n): cm for s, n, cm in rows}

@@ -9,8 +9,8 @@ class CatalogTest(LedgerTestCase):
         load_catalog()
 
     def test_expansion_by_code_case_insensitive(self):
-        self.assertEqual(catalog.expansion_by_code("NEO").name, "Kamigawa: Neon Dynasty")
-        self.assertIsNone(catalog.expansion_by_code("zzz"))
+        self.assertEqual(catalog.expansion_by_code("NEO", game()).name, "Kamigawa: Neon Dynasty")
+        self.assertIsNone(catalog.expansion_by_code("zzz", game()))
 
     def test_blueprint_without_category_is_a_card(self):
         self.assertFalse(Blueprint(name="x").is_product)
@@ -35,11 +35,11 @@ class CatalogTest(LedgerTestCase):
         self.assertTrue(SyncLog.objects.filter(message__contains="shares #107").exists())
 
     def test_blueprint_of_by_product_then_by_number(self):
-        linked = Card(name="Sheoldred", set_code="XXX", cm_product_id=cm_id(1301))
-        by_number = Card(name="Sheoldred", set_code="DMU", collector_number="0107")
+        linked = Card(game=game(), name="Sheoldred", set_code="XXX", cm_product_id=cm_id(1301))
+        by_number = Card(game=game(), name="Sheoldred", set_code="DMU", collector_number="0107")
         self.assertEqual(catalog.blueprint_of(linked).cm_product_id, cm_id(1301))
         self.assertEqual(catalog.blueprint_of(by_number).cm_product_id, cm_id(1301))
-        self.assertIsNone(catalog.blueprint_of(Card(name="x", set_code="DMU")))
+        self.assertIsNone(catalog.blueprint_of(Card(game=game(), name="x", set_code="DMU")))
 
 
 class MergeOwnersTest(LedgerTestCase):

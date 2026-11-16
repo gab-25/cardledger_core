@@ -78,20 +78,25 @@ def _mark_product(card, bp):
 
 
 def card_for_blueprint(bp):
-    """The Ledger card of a catalog blueprint: the one tied to it, an adopted hand-entered row, or a new one."""
+    """The Ledger card of a catalog blueprint: the one tied to it, an adopted hand-entered row, or a new one.
+
+    Only cards of the blueprint's game are looked at, and a new card belongs to that game.
+    """
     from .forms import get_or_create_card
     from .models import Card, SyncLog
 
-    card = Card.objects.filter(cm_product_id=bp.cm_product_id).order_by("pk").first()
+    game = bp.expansion.game
+    cards = Card.objects.filter(game=game)
+    card = cards.filter(cm_product_id=bp.cm_product_id).order_by("pk").first()
     if card is not None:
         return _mark_product(card, bp)
     set_code = bp.expansion.code.upper()
     if bp.collector_number:
         # adopt a hand-entered (name + set) row instead of duplicating it
-        legacy = Card.objects.filter(
+        legacy = cards.filter(
             name__iexact=bp.name, set_code=set_code, collector_number="", cm_product_id__isnull=True
         ).first()
-        if legacy is not None and not Card.objects.filter(
+        if legacy is not None and not cards.filter(
             set_code=set_code, collector_number=bp.collector_number
         ).exists():
             legacy.cm_product_id = bp.cm_product_id
@@ -100,14 +105,14 @@ def card_for_blueprint(bp):
             return _mark_product(legacy, bp)
     # One Card per printing: a missing number, or one already taken by another product, gets a unique stand-in.
     number = bp.collector_number or stand_in_number(bp.cm_product_id)
-    taken = Card.objects.filter(set_code=set_code, collector_number=number).first()
+    taken = cards.filter(set_code=set_code, collector_number=number).first()
     if taken is not None and taken.cm_product_id not in (None, bp.cm_product_id):
         SyncLog.objects.create(
             level=SyncLog.Level.WARNING,
             message=f"{bp} shares #{number} with {taken}: stored as #{stand_in_number(bp.cm_product_id)}"[:300],
         )
         number = stand_in_number(bp.cm_product_id)
-    card = get_or_create_card(bp.name, set_code, number)
+    card = get_or_create_card(game, bp.name, set_code, number)
     if card.cm_product_id is None:
         card.cm_product_id = bp.cm_product_id
         card.save(update_fields=["cm_product_id"])
@@ -120,18 +125,20 @@ def stand_in_number(cm_product_id):
 
 
 def blueprint_of(card):
-    """The catalog printing of a Ledger card: by its Cardmarket product, else by set code + collector number."""
+    """The catalog printing of a Ledger card, in the card's game: by its Cardmarket product, else by set code +
+    collector number."""
     from .models import Blueprint
 
+    printings = Blueprint.objects.select_related("expansion", "category").filter(expansion__game_id=card.game_id)
     if card.cm_product_id:
-        bp = Blueprint.objects.select_related("expansion", "category").filter(cm_product_id=card.cm_product_id).first()
+        bp = printings.filter(cm_product_id=card.cm_product_id).first()
         if bp is not None:
             return bp
     number = normalize_number(card.collector_number)
     if not number:
         return None
-    return (Blueprint.objects.select_related("expansion", "category")
-            .filter(expansion__code=card.set_code.lower(), collector_number=number).order_by("cm_product_id").first())
+    return (printings.filter(expansion__code=card.set_code.lower(), collector_number=number)
+            .order_by("cm_product_id").first())
 
 
 @dataclass
@@ -168,8 +175,11 @@ def _same_printing(a, b):
     return not na or not nb or na == nb or na.startswith(stand_in) or nb.startswith(stand_in)
 
 
-def reconcile_cards():
+def reconcile_cards(game=None):
     """Align the Ledger's cards with the catalog: link, fold duplicates, take the catalog's set code and number.
+
+    One game at a time (all of them when game is None): a card is only ever linked to a printing of its own game and
+    folded into a card of its own game.
 
     1. a card with no Cardmarket product is linked by set code + collector number;
     2. cards on the same product fold into the oldest when they are the same printing; otherwise (different real
@@ -178,28 +188,38 @@ def reconcile_cards():
     3. a linked card takes its printing's set code, collector number (or CM stand-in) and product flag; when another
        card already holds them, the two fold.
     """
+    from .models import Game
+
+    result = ReconcileResult()
+    for one in [game] if game is not None else Game.objects.order_by("pk"):
+        _reconcile_game(one, result)
+    return result
+
+
+def _reconcile_game(game, result):
     from django.db.models import Count
 
     from .models import Blueprint, Card
     from .services import link_blueprint
 
-    result = ReconcileResult()
-    for card in Card.objects.filter(cm_product_id__isnull=True).exclude(collector_number=""):
+    cards = Card.objects.filter(game=game)
+    for card in cards.filter(cm_product_id__isnull=True).exclude(collector_number=""):
         link_blueprint(card)
 
-    duplicated = (Card.objects.exclude(cm_product_id=None).values("cm_product_id").annotate(n=Count("pk"))
+    duplicated = (cards.exclude(cm_product_id=None).values("cm_product_id").annotate(n=Count("pk"))
                   .filter(n__gt=1).values_list("cm_product_id", flat=True))
     for cm in list(duplicated):
-        target, *sources = Card.objects.filter(cm_product_id=cm).order_by("pk")
+        target, *sources = cards.filter(cm_product_id=cm).order_by("pk")
         for source in sources:
             if not _same_printing(source, target) or not _fold(source, target, result):
                 source.cm_product_id = None
                 source.save(update_fields=["cm_product_id"])
 
-    linked_ids = Card.objects.exclude(cm_product_id=None).values("cm_product_id")
+    in_game = Blueprint.objects.filter(expansion__game=game)
+    linked_ids = cards.exclude(cm_product_id=None).values("cm_product_id")
     printings = {bp.cm_product_id: bp for bp in
-                 Blueprint.objects.select_related("expansion", "category").filter(cm_product_id__in=linked_ids)}
-    for card in Card.objects.filter(cm_product_id__in=list(printings)).order_by("pk"):
+                 in_game.select_related("expansion", "category").filter(cm_product_id__in=linked_ids)}
+    for card in cards.filter(cm_product_id__in=list(printings)).order_by("pk"):
         bp = printings[card.cm_product_id]
         if not bp.collector_number and not bp.is_product and card.collector_number:
             # a single Scryfall gives no number for: the card's own set code and number are the better identity
@@ -210,10 +230,10 @@ def reconcile_cards():
         set_code, number = bp.expansion.code.upper(), bp.collector_number or stand_in_number(bp.cm_product_id)
         if (card.set_code, card.collector_number, card.is_product) == (set_code, number, bp.is_product):
             continue
-        taken = Card.objects.filter(set_code=set_code, collector_number=number).exclude(pk=card.pk).first()
+        taken = cards.filter(set_code=set_code, collector_number=number).exclude(pk=card.pk).first()
         if taken is not None and taken.cm_product_id not in (None, bp.cm_product_id):
             number = stand_in_number(bp.cm_product_id)  # the number belongs to another printing
-            taken = Card.objects.filter(set_code=set_code, collector_number=number).exclude(pk=card.pk).first()
+            taken = cards.filter(set_code=set_code, collector_number=number).exclude(pk=card.pk).first()
         if taken is not None:
             if _fold(card, taken, result):
                 taken.cm_product_id, taken.is_product = bp.cm_product_id, bp.is_product
@@ -223,13 +243,14 @@ def reconcile_cards():
         card.save(update_fields=["set_code", "collector_number", "is_product"])
         result.rewritten += 1
 
-    result.linked = Card.objects.filter(cm_product_id__in=Blueprint.objects.values("cm_product_id")).count()
-    result.unlinked = Card.objects.count() - result.linked
-    return result
+    linked = cards.filter(cm_product_id__in=in_game.values("cm_product_id")).count()
+    result.linked += linked
+    result.unlinked += cards.count() - linked
 
 
-def expansion_by_code(code):
+def expansion_by_code(code, game):
+    """The expansion of game with this set code (any case), or None."""
     from .models import Expansion
 
     code = (code or "").strip().lower()
-    return Expansion.objects.filter(code=code).first() if code else None
+    return Expansion.objects.filter(game=game, code=code).first() if code else None

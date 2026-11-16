@@ -16,7 +16,7 @@ from rest_framework.response import Response
 
 from .. import services
 from ..forms import CatalogItemForm, CsvImportForm, ItemForm
-from ..models import Blueprint, Card, Category, CollectionItem, Condition, Language, Listing, SyncLog
+from ..models import MAGIC, Blueprint, Card, Category, CollectionItem, Condition, Language, Listing, SyncLog
 from ..presentation import item_badge
 from .common import PAGE, doc, form_body, form_errors, messages_response, msg, page_payload, query
 
@@ -121,9 +121,10 @@ def _collection(request):
     if cond in Condition.values:
         items = items.filter(condition=cond)
     if category is not None:
-        items = items.filter(category_ct_id=category)
+        # a category id is only unique within a game: the collection's categories are Magic's (until it has a game)
+        items = items.filter(category_ct_id=category, card__game__slug=MAGIC)
     owned_products = Card.objects.filter(items__owner=user, cm_product_id__isnull=False).values("cm_product_id")
-    categories = (Category.objects.filter(blueprints__cm_product_id__in=owned_products).distinct()
+    categories = (Category.objects.filter(game__slug=MAGIC, blueprints__cm_product_id__in=owned_products).distinct()
                   .order_by("name", "cm_id"))
 
     return Response({
