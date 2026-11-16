@@ -384,7 +384,7 @@ def product_payload(listing, accepted=None):
         "quantity": listing.quantity,
         "properties": properties,
         "error_mode": "strict",
-        "user_data_field": f"mtg-ledger:{listing.pk}",
+        "user_data_field": f"cardledger:{listing.pk}",
     }
     if listing.ct_product_id:
         payload["id"] = listing.ct_product_id

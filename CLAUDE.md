@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-MTG Ledger server: a Django 6 + Django REST Framework app (Python 3.14, managed with `uv`) that holds a Magic: The
-Gathering collection and manages CardTrader sales. It exposes only a JSON API under `/api/`; the interface is a
-separate React SPA ([mtg_ledger_ui](https://github.com/gab-25/mtg_ledger_ui)), included as the git submodule `ui/`
+CardLedger server: a Django 6 + Django REST Framework app (Python 3.14, managed with `uv`) that holds a trading card
+collection (Magic: The Gathering for now) and manages CardTrader sales. It exposes only a JSON API under `/api/`; the interface is a
+separate React SPA ([cardledger_ui](https://github.com/gab-25/cardledger_ui)), included as the git submodule `ui/`
 (pinned to a release tag; the Dockerfile builds it in a Node stage), whose built `index.html` Django serves for every
 other URL (`config/views.py`, catch-all route last in `config/urls.py`, files from `UI_APP_DIR`, default `ui/dist`).
 
@@ -93,4 +93,4 @@ with demo data and a CardTrader token, a second user `ami`, and `FakeCardTrader`
 - `docs/superpowers/` is gitignored (local design notes): never commit it.
 - Work on a branch in the main checkout; PRs are squash-merged into `main` and named after the change.
   Releases (GitHub release → Docker image on ghcr.io) bump `version` in `pyproject.toml` and move the `ui` submodule
-  to the matching mtg_ledger_ui tag.
+  to the matching cardledger_ui tag.

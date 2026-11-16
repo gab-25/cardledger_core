@@ -16,7 +16,7 @@ from .catalog import normalize_number
 
 BULK_DATA_URL = "https://api.scryfall.com/bulk-data"
 SETS_URL = "https://api.scryfall.com/sets"
-USER_AGENT = "mtg-ledger/0.1"
+USER_AGENT = "cardledger/0.1"
 BULK_TYPE = "default_cards"
 
 

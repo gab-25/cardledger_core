@@ -99,9 +99,9 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('POSTGRES_DB', 'mtg_ledger'),
-        'USER': os.environ.get('POSTGRES_USER', 'mtg_ledger'),
-        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'mtg_ledger'),
+        'NAME': os.environ.get('POSTGRES_DB', 'cardledger'),
+        'USER': os.environ.get('POSTGRES_USER', 'cardledger'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cardledger'),
         'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
         'CONN_MAX_AGE': int(os.environ.get('POSTGRES_CONN_MAX_AGE', '60')),
@@ -147,7 +147,7 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-# The built React UI (gab-25/mtg_ledger_ui): index.html is served for every page URL, its assets under
+# The built React UI (gab-25/cardledger_ui): index.html is served for every page URL, its assets under
 # /static/ui/ (the Vite build uses base "/static/ui/"). By default the build of the `ui` git submodule, which the
 # Docker image builds too.
 UI_APP_DIR = Path(os.environ.get('UI_APP_DIR') or BASE_DIR / 'ui' / 'dist').resolve()
@@ -171,8 +171,8 @@ REST_FRAMEWORK = {
 }
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'MTG Ledger API',
-    'DESCRIPTION': 'The JSON API of MTG Ledger, used by its React UI.',
+    'TITLE': 'CardLedger API',
+    'DESCRIPTION': 'The JSON API of CardLedger, used by its React UI.',
     # The project version, so the docs follow its bumps (pyproject.toml is in the image too).
     'VERSION': tomllib.loads((BASE_DIR / 'pyproject.toml').read_text())['project']['version'],
     'SERVE_INCLUDE_SCHEMA': False,

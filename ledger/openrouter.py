@@ -53,7 +53,7 @@ class OpenRouterClient:
         self.model = model
         self._http = httpx.Client(
             base_url=base_url,
-            headers={"Authorization": f"Bearer {key}", "X-Title": "MTG Ledger"},
+            headers={"Authorization": f"Bearer {key}", "X-Title": "CardLedger"},
             timeout=timeout,
             transport=transport,
         )

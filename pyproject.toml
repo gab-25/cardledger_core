@@ -1,5 +1,5 @@
 [project]
-name = "mtg-ledger-core"
+name = "cardledger-core"
 version = "0.10.0"
 requires-python = ">=3.14"
 dependencies = [
