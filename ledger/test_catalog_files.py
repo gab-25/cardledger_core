@@ -106,16 +106,31 @@ class CatalogBucketTest(SimpleTestCase):
             ):
                 CatalogBucket()
 
-    def test_empty_region_is_the_same_as_unset(self):
-        # compose forwards AWS_DEFAULT_REGION= from a .env as an empty string; boto3 would build "s3..amazonaws.com"
-        env = {"AWS_DEFAULT_REGION": "", "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y",
-               "AWS_CONFIG_FILE": "/nonexistent"}
-        with mock.patch.dict(os.environ, env), override_settings(CARDLEDGER_CATALOG_ENDPOINT=""):
+    def test_empty_region_defaults_to_us_east_1(self):
+        # An empty region would make boto3 build "https://s3..amazonaws.com"; AWS_* variables are never read.
+        env = {"AWS_DEFAULT_REGION": "eu-central-1", "AWS_CONFIG_FILE": "/nonexistent"}
+        with mock.patch.dict(os.environ, env), override_settings(
+            CARDLEDGER_CATALOG_ENDPOINT="", CARDLEDGER_CATALOG_REGION=""
+        ):
             client = CatalogBucket().client
+        self.assertEqual(client.meta.region_name, "us-east-1")
         self.assertEqual(client.meta.endpoint_url, "https://s3.amazonaws.com")
 
     def test_configured_region_is_used(self):
-        env = {"AWS_DEFAULT_REGION": "eu-west-1", "AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"}
-        with mock.patch.dict(os.environ, env), override_settings(CARDLEDGER_CATALOG_ENDPOINT=""):
+        env = {"AWS_DEFAULT_REGION": "us-west-2"}
+        with mock.patch.dict(os.environ, env), override_settings(
+            CARDLEDGER_CATALOG_ENDPOINT="", CARDLEDGER_CATALOG_REGION="eu-west-1"
+        ):
             client = CatalogBucket().client
         self.assertEqual(client.meta.region_name, "eu-west-1")
+
+    def test_credentials_come_from_cardledger_settings(self):
+        env = {"AWS_ACCESS_KEY_ID": "aws-key", "AWS_SECRET_ACCESS_KEY": "aws-secret"}
+        with mock.patch.dict(os.environ, env), override_settings(
+            CARDLEDGER_CATALOG_ACCESS_KEY_ID="cl-key", CARDLEDGER_CATALOG_SECRET_ACCESS_KEY="cl-secret",
+            CARDLEDGER_CATALOG_REGION="auto", CARDLEDGER_CATALOG_ENDPOINT="https://example.r2.cloudflarestorage.com",
+        ):
+            client = CatalogBucket().client
+        credentials = client._request_signer._credentials
+        self.assertEqual((credentials.access_key, credentials.secret_key), ("cl-key", "cl-secret"))
+        self.assertEqual(client.meta.endpoint_url, "https://example.r2.cloudflarestorage.com")

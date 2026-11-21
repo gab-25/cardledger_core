@@ -75,8 +75,9 @@ Environment variables: the `POSTGRES_*` ones above, `DJANGO_SECRET_KEY`, `DJANGO
 `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` (comma-separated), `DJANGO_BEHIND_HTTPS_PROXY` (`true` when a
 reverse proxy terminates HTTPS and sets `X-Forwarded-Proto`), `GUNICORN_WORKERS`,
 `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `CELERY_BROKER_URL` (default `redis://localhost:6379/0`), and for the catalog
-files `CARDLEDGER_CATALOG_BUCKET`, `CARDLEDGER_CATALOG_ENDPOINT` (only for S3-compatible storage, empty = AWS) and the
-standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` (`auto` for Cloudflare R2); see below.
+files `CARDLEDGER_CATALOG_BUCKET`, `CARDLEDGER_CATALOG_ENDPOINT` (only for S3-compatible storage, empty = AWS),
+`CARDLEDGER_CATALOG_REGION` (empty = `us-east-1`, `auto` for Cloudflare R2), `CARDLEDGER_CATALOG_ACCESS_KEY_ID` and
+`CARDLEDGER_CATALOG_SECRET_ACCESS_KEY` (the `AWS_*` variables are never read); see below.
 The app container applies pending migrations (`python manage.py migrate`) every time it starts, before gunicorn; the
 Celery worker does not. If a migration fails the container exits without serving, and its logs show why.
 
@@ -155,8 +156,8 @@ rolled back without stopping the others.
 
 ### Deploying this version
 
-- Set `CARDLEDGER_CATALOG_BUCKET` and the `AWS_*` variables (plus `CARDLEDGER_CATALOG_ENDPOINT` for S3-compatible
-  storage) on both the app and the worker, and let the generator publish its files to the bucket first: without
+- Set the `CARDLEDGER_CATALOG_*` variables (bucket, region, access key and secret, plus the endpoint for
+  S3-compatible storage) on the worker, where the sync runs, and let the generator publish its files to the bucket first: without
   them the catalog is not rebuilt (Magic's prices still are).
 - Restart the app and the worker together: the app applies the migrations when it starts, and an old worker running
   the sync after them would fail.
