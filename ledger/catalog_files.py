@@ -1,21 +1,29 @@
-"""Reads the catalog files (format v1) that cardledger_database generates, from S3."""
+"""Reads the catalog files (format v1) that cardledger_database generates, from S3: one file per game, no manifest."""
 
 import gzip
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
 
 FORMAT_VERSION = 1
-MANIFEST_KEY = "catalog/v1/manifest.json"
 
 
 class CatalogFilesError(Exception):
     pass
+
+
+class CatalogFileMissing(CatalogFilesError):
+    """The bucket holds no file for that game."""
+
+
+def catalog_key(slug):
+    """Where a game's file is in the bucket, the same key the generator uploads it to."""
+    return f"catalog/v{FORMAT_VERSION}/{slug}.jsonl.gz"
 
 
 @dataclass(frozen=True)
@@ -42,8 +50,7 @@ class FileProduct:
 @dataclass(frozen=True)
 class GameFile:
     slug: str
-    sha256: str
-    generated_at: datetime | None
+    sha256: str  # of the file's raw (compressed) bytes
     expansions: list[FileExpansion]
     products: list[FileProduct]
 
@@ -95,30 +102,21 @@ class CatalogBucket:
             client = _s3_client()
         self.client = client
 
-    def _read(self, key):
+    def fetch(self, slug):
+        """The raw bytes of slug's file. Raises CatalogFileMissing when the bucket has none."""
+        key = catalog_key(slug)
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=key)
             return response["Body"].read()
-        except (BotoCoreError, ClientError) as exc:
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+                raise CatalogFileMissing(f"No catalog file {key}") from exc
+            raise CatalogFilesError(f"Cannot read {key}: {exc}") from exc
+        except BotoCoreError as exc:
             raise CatalogFilesError(f"Cannot read {key}: {exc}") from exc
 
-    def manifest(self):
-        try:
-            manifest = json.loads(self._read(MANIFEST_KEY))
-        except ValueError as exc:
-            raise CatalogFilesError(f"Invalid manifest: {exc}") from exc
-        if not isinstance(manifest, dict) or manifest.get("format_version") != FORMAT_VERSION:
-            raise CatalogFilesError("Unsupported catalog format version")
-        return manifest
-
-    def game_file(self, slug, entry):
-        try:
-            key, expected = entry["key"], entry["sha256"]
-        except (KeyError, TypeError) as exc:
-            raise CatalogFilesError(f"Invalid manifest entry for {slug}") from exc
-        data = self._read(key)
-        if hashlib.sha256(data).hexdigest() != expected:
-            raise CatalogFilesError(f"Checksum mismatch for {key}")
+    def parse(self, slug, data):
+        """slug's file from its raw bytes (expansion lines, then product lines; other lines are ignored)."""
         expansions, products = [], []
         try:
             for line in gzip.decompress(data).decode("utf-8").splitlines():
@@ -130,8 +128,6 @@ class CatalogBucket:
                     expansions.append(_expansion(row))
                 elif kind == "product":
                     products.append(_product(row))
-            generated_at = entry.get("generated_at")
-            generated_at = datetime.fromisoformat(generated_at) if generated_at else None
         except (OSError, EOFError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise CatalogFilesError(f"Invalid catalog file {key}: {exc}") from exc
-        return GameFile(slug, expected, generated_at, expansions, products)
+            raise CatalogFilesError(f"Invalid catalog file {catalog_key(slug)}: {exc}") from exc
+        return GameFile(slug, hashlib.sha256(data).hexdigest(), expansions, products)

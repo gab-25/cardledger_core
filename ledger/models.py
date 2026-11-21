@@ -65,7 +65,6 @@ class Game(models.Model):
     catalog_sha256 = models.CharField(
         max_length=64, blank=True, help_text="sha256 of the catalog file last imported (the sync skips the same file)",
     )
-    catalog_generated_at = models.DateTimeField(null=True, blank=True, help_text="When that file was generated")
 
     class Meta:
         ordering = ["name"]

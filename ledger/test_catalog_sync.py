@@ -3,18 +3,18 @@ import gzip
 import hashlib
 import io
 import json
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 from io import StringIO
 from unittest import mock
 
 import httpx
-from botocore.exceptions import NoRegionError
+from botocore.exceptions import ClientError, NoRegionError
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 
 from . import cardmarket, catalog, catalog_files, catalog_sync
-from .catalog_files import MANIFEST_KEY, CatalogBucket
+from .catalog_files import CatalogBucket, catalog_key
 from .models import (
     Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, Listing, ScanLine, ScanSession,
     SyncLog,
@@ -23,7 +23,6 @@ from .tests import LedgerTestCase, game, load_catalog
 
 BUCKET = "test-catalog"
 TOKEN, UNMATCHED = 501250, 501203
-GENERATED_AT = "2026-11-16T18:25:56.894205+00:00"
 
 
 def expansion(code, name, released_at, language=""):
@@ -77,34 +76,26 @@ def jsonl_gz(lines):
 
 
 class FakeBucket:
-    """A boto3 S3 client holding the generator's v1 files: a manifest and one gzipped JSON lines file per game."""
+    """A boto3 S3 client holding the generator's v1 files: one gzipped JSON lines file per game, no manifest."""
 
     def __init__(self):
         self.games = {"mtg": copy.deepcopy(MAGIC), "pokemon": copy.deepcopy(POKEMON)}
-        self.corrupt = set()  # slugs whose file is not gzip (its checksum still matches)
-        self.manifest = None  # raw manifest replacing the generated one
+        self.corrupt = set()  # slugs whose file is not gzip
+        self.denied = set()  # slugs whose file cannot be read (access denied)
         self.reads = []
 
     def _file(self, slug):
         return b"not a gzip file" if slug in self.corrupt else jsonl_gz(self.games[slug])
 
-    def _manifest(self):
-        if self.manifest is not None:
-            return json.dumps(self.manifest).encode()
-        return json.dumps({"format_version": 1, "games": {
-            slug: {"key": f"catalog/v1/{slug}.jsonl.gz", "sha256": hashlib.sha256(self._file(slug)).hexdigest(),
-                   "generated_at": GENERATED_AT}
-            for slug in self.games
-        }}).encode()
-
     def get_object(self, Bucket, Key):
         assert Bucket == BUCKET
         self.reads.append(Key)
-        if Key == MANIFEST_KEY:
-            data = self._manifest()
-        else:
-            data = self._file(Key.removeprefix("catalog/v1/").removesuffix(".jsonl.gz"))
-        return {"Body": io.BytesIO(data)}
+        slug = Key.removeprefix("catalog/v1/").removesuffix(".jsonl.gz")
+        if slug in self.denied:
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}, "GetObject")
+        if slug not in self.games:
+            raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "Not Found"}}, "GetObject")
+        return {"Body": io.BytesIO(self._file(slug))}
 
     def sha256(self, slug):
         return hashlib.sha256(self._file(slug)).hexdigest()
@@ -168,7 +159,6 @@ class SyncTest(CatalogSyncTestCase):
         self.assertEqual(Category.objects.get(game=game(), cm_id=5).name, "Magic Display")
         magic = game()
         self.assertEqual(magic.catalog_sha256, self.files.sha256("mtg"))
-        self.assertEqual(magic.catalog_generated_at, datetime(2026, 11, 16, 18, 25, 56, 894205, tzinfo=timezone.utc))
         self.assertEqual(self.ct.calls, [])  # CardTrader is never contacted
 
     def test_each_game_gets_its_own_catalog(self):
@@ -184,10 +174,14 @@ class SyncTest(CatalogSyncTestCase):
         Blueprint.objects.filter(cm_product_id=501201).update(name="Edited")
         self.cm.guides[1]["priceGuides"][0]["trend"] = 2.5
         self.files.reads.clear()
-        results = self.sync()
+        with mock.patch.object(CatalogBucket, "parse", side_effect=AssertionError("parsed")):
+            results = self.sync()  # the same bytes: not even parsed
         self.assertFalse(results["mtg"].imported)
+        self.assertEqual(results["mtg"].error, "")
         self.assertEqual(Blueprint.objects.get(cm_product_id=501201).name, "Edited")
-        self.assertEqual(self.files.reads, [MANIFEST_KEY])  # no game file is downloaded again
+        # Every game's file is downloaded, in slug order, to compare its sha256.
+        self.assertEqual(self.files.reads, [catalog_key(g) for g in Game.objects.order_by("slug").values_list(
+            "slug", flat=True)])
         self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend, Decimal("2.50"))  # prices still are
         self.assertEqual((results["mtg"].expansions, results["mtg"].blueprints, results["mtg"].priced), (3, 7, 2))
 
@@ -263,9 +257,10 @@ class SyncTest(CatalogSyncTestCase):
         self.assertIn("nope", results["pokemon"].error)
         self.assertFalse(Blueprint.objects.filter(expansion__game=game("pokemon")).exists())
 
-    def test_game_missing_from_the_manifest_is_an_error(self):
+    def test_game_file_missing_is_an_error(self):
         results = self.sync()
-        self.assertIn("not in the catalog manifest", results["lorcana"].error)
+        self.assertIn("No catalog file catalog/v1/lorcana.jsonl.gz", results["lorcana"].error)
+        self.assertFalse(results["lorcana"].unexpected)
         self.assertEqual(list(results), sorted(Game.objects.values_list("slug", flat=True)))
 
     def with_lorcana(self):
@@ -325,14 +320,19 @@ class SyncTest(CatalogSyncTestCase):
         self.assertEqual(Blueprint.objects.get(cm_product_id=700001).name, "Pikachu")
         self.assertEqual(game("pokemon").catalog_sha256, sha)
 
-    def test_game_missing_from_the_manifest_with_a_catalog_still_updates_its_prices(self):
+    def test_missing_game_file_keeps_catalog_and_updates_prices(self):
         self.sync()
+        sha = game("pokemon").catalog_sha256
         del self.files.games["pokemon"]
         self.cm.guides[6]["priceGuides"][0]["trend"] = 3.0
         results = self.sync()
-        self.assertIn("not in the catalog manifest", results["pokemon"].error)
+        pokemon = results["pokemon"]
+        self.assertIn("No catalog file", pokemon.error)
+        self.assertEqual((pokemon.imported, pokemon.blueprints, pokemon.priced), (False, 2, 1))
         self.assertEqual(CardmarketPrice.objects.get(pk=700001).trend, Decimal("3.00"))
         self.assertEqual(Blueprint.objects.filter(expansion__game=game("pokemon")).count(), 2)
+        self.assertEqual(game("pokemon").catalog_sha256, sha)
+        self.assertEqual(results["mtg"].error, "")
 
 
 class PruneTest(CatalogSyncTestCase):
@@ -348,7 +348,7 @@ class PruneTest(CatalogSyncTestCase):
         self.assertFalse(Expansion.objects.filter(code="ctold").exists())
 
     def test_prune_never_touches_another_game(self):
-        self.old_blueprint(888004, slug="yugioh")  # Yu-Gi-Oh! is not in the manifest
+        self.old_blueprint(888004, slug="yugioh")  # Yu-Gi-Oh! has no file
         self.sync()
         self.assertTrue(Blueprint.objects.filter(cm_product_id=888004).exists())
 
@@ -404,7 +404,7 @@ class RunSyncTest(CatalogSyncTestCase):
         self.assertIn("cards linked", magic.message)
         self.assertEqual(logs["Pokémon"].level, SyncLog.Level.OK)
         self.assertEqual(logs["Disney Lorcana"].level, SyncLog.Level.WARNING)
-        self.assertIn("not in the catalog manifest", logs["Disney Lorcana"].message)
+        self.assertIn("No catalog file", logs["Disney Lorcana"].message)
 
     def test_unchanged_file_is_told_in_the_log(self):
         self.run_sync()
@@ -453,35 +453,25 @@ class RunSyncTest(CatalogSyncTestCase):
                 self.assertIn("catalog sync failed: ", log.message)
         self.assertFalse(Blueprint.objects.exists())
 
-    def test_unreadable_manifest_still_updates_prices_of_existing_catalogs(self):
+    def test_unreadable_game_file_still_updates_prices_of_existing_catalog(self):
         self.run_sync()
         self.cm.guides[1]["priceGuides"][0]["trend"] = 2.5
         self.files.games["mtg"][3]["name"] = "Counterspell (Retro)"
-        self.files.manifest = {"format_version": 2, "games": {}}
+        self.files.denied.add("mtg")
         before = SyncLog.objects.count()
         self.run_sync()
         logs = self.game_logs(before)
-        self.assertIn("Unsupported catalog format version", logs["Magic: The Gathering"].message)
+        self.assertIn("Cannot read catalog/v1/mtg.jsonl.gz", logs["Magic: The Gathering"].message)
         self.assertEqual(logs["Magic: The Gathering"].level, SyncLog.Level.WARNING)
         self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend, Decimal("2.50"))
         self.assertEqual(Blueprint.objects.get(cm_product_id=501201).name, "Counterspell")
+        self.assertEqual(logs["Pokémon"].level, SyncLog.Level.OK)
 
-    def test_unreadable_manifest_logs_and_changes_nothing(self):
-        self.files.manifest = {"format_version": 2, "games": {}}
+    def test_unreadable_game_files_log_and_change_nothing(self):
+        self.files.denied.update({"mtg", "pokemon"})
         self.run_sync()
-        self.assertIn("Unsupported catalog format version", SyncLog.objects.latest("pk").message)
-        self.assertFalse(Blueprint.objects.exists())
-
-    def test_manifest_without_games_logs_and_changes_nothing(self):
-        for games in (None, [], "mtg"):
-            with self.subTest(games=games):
-                self.files.manifest = {"format_version": 1} if games is None else {"format_version": 1,
-                                                                                   "games": games}
-                self.run_sync()
-                log = SyncLog.objects.latest("pk")
-                self.assertEqual(log.level, SyncLog.Level.WARNING)
-                self.assertTrue(log.message.endswith("catalog sync failed: the catalog manifest has no games"),
-                                log.message)
+        self.assertIn("Cannot read catalog/v1/pokemon.jsonl.gz",
+                      SyncLog.objects.filter(message__startswith="Pokémon").latest("pk").message)
         self.assertFalse(Blueprint.objects.exists())
 
     def test_unexpected_failure_of_one_game_logs_every_game_and_raises(self):

@@ -11,7 +11,7 @@ from botocore.response import StreamingBody
 from botocore.stub import Stubber
 from django.test import SimpleTestCase, override_settings
 
-from ledger.catalog_files import CatalogBucket, CatalogFilesError
+from ledger.catalog_files import CatalogBucket, CatalogFileMissing, CatalogFilesError, catalog_key
 
 BUCKET = "test-bucket"
 LINES = [
@@ -45,25 +45,38 @@ class CatalogBucketTest(SimpleTestCase):
             "get_object", {"Body": body(data)}, {"Bucket": BUCKET, "Key": key}
         )
 
-    def entry(self, data, sha=None):
-        return {"key": "catalog/v1/lorcana.jsonl.gz", "sha256": sha or hashlib.sha256(data).hexdigest()}
+    def expect_missing(self, key):
+        self.stub.add_client_error(
+            "get_object", service_error_code="NoSuchKey", http_status_code=404,
+            expected_params={"Bucket": BUCKET, "Key": key},
+        )
 
-    def test_manifest_is_read(self):
-        manifest = {"format_version": 1, "games": {"mtg": {"key": "k"}}}
-        self.expect_get("catalog/v1/manifest.json", json.dumps(manifest).encode())
-        self.assertEqual(CatalogBucket(client=self.client).manifest(), manifest)
+    def test_catalog_key(self):
+        self.assertEqual(catalog_key("lorcana"), "catalog/v1/lorcana.jsonl.gz")
 
-    def test_unknown_format_version_is_rejected(self):
-        self.expect_get("catalog/v1/manifest.json", b'{"format_version": 2, "games": {}}')
-        with self.assertRaises(CatalogFilesError):
-            CatalogBucket(client=self.client).manifest()
-
-    def test_game_file_is_parsed(self):
+    def test_fetch_returns_the_raw_bytes(self):
         data = jsonl_gz(LINES)
         self.expect_get("catalog/v1/lorcana.jsonl.gz", data)
-        game = CatalogBucket(client=self.client).game_file("lorcana", self.entry(data))
+        self.assertEqual(CatalogBucket(client=self.client).fetch("lorcana"), data)
+
+    def test_missing_object_raises_catalog_file_missing(self):
+        self.expect_missing("catalog/v1/lorcana.jsonl.gz")
+        with self.assertRaises(CatalogFileMissing) as raised:
+            CatalogBucket(client=self.client).fetch("lorcana")
+        self.assertIsInstance(raised.exception, CatalogFilesError)
+
+    def test_other_read_errors_raise_catalog_files_error(self):
+        self.stub.add_client_error("get_object", service_error_code="AccessDenied", http_status_code=403)
+        with self.assertRaises(CatalogFilesError) as raised:
+            CatalogBucket(client=self.client).fetch("lorcana")
+        self.assertNotIsInstance(raised.exception, CatalogFileMissing)
+
+    def parse(self, data):
+        return CatalogBucket(client=self.client).parse("lorcana", data)
+
+    def test_game_file_is_parsed(self):
+        game = self.parse(jsonl_gz(LINES))
         self.assertEqual(game.slug, "lorcana")
-        self.assertEqual(game.sha256, hashlib.sha256(data).hexdigest())
         self.assertEqual([e.code for e in game.expansions], ["1", "2"])
         self.assertEqual(game.expansions[0].released_at, date(2023, 9, 1))
         self.assertIsNone(game.expansions[1].released_at)
@@ -74,30 +87,29 @@ class CatalogBucketTest(SimpleTestCase):
         self.assertEqual(product.image_large_url, "L")
         self.assertEqual(product.category_name, "Cards")
 
-    def test_sha256_mismatch_is_rejected(self):
+    def test_sha256_is_computed_from_raw_bytes(self):
         data = jsonl_gz(LINES)
-        self.expect_get("catalog/v1/lorcana.jsonl.gz", data)
-        with self.assertRaises(CatalogFilesError):
-            CatalogBucket(client=self.client).game_file("lorcana", self.entry(data, sha="0" * 64))
+        self.assertEqual(self.parse(data).sha256, hashlib.sha256(data).hexdigest())
+        # The same lines compressed differently are another file.
+        other = gzip.compress("\n".join(json.dumps(x) for x in LINES).encode() + b"\n", mtime=12345)
+        self.assertNotEqual(self.parse(other).sha256, self.parse(data).sha256)
 
     def test_corrupt_gzip_is_rejected(self):
-        data = b"not gzip at all"
-        self.expect_get("catalog/v1/lorcana.jsonl.gz", data)
         with self.assertRaises(CatalogFilesError):
-            CatalogBucket(client=self.client).game_file("lorcana", self.entry(data))
+            self.parse(b"not gzip at all")
+
+    def test_invalid_json_is_rejected(self):
+        with self.assertRaises(CatalogFilesError):
+            self.parse(gzip.compress(b"{not json\n"))
 
     def test_unknown_line_type_is_ignored(self):
-        data = jsonl_gz([{"type": "future", "x": 1}] + LINES)
-        self.expect_get("catalog/v1/lorcana.jsonl.gz", data)
-        game = CatalogBucket(client=self.client).game_file("lorcana", self.entry(data))
+        game = self.parse(jsonl_gz([{"type": "future", "x": 1}] + LINES))
         self.assertEqual(len(game.expansions), 2)
         self.assertEqual(len(game.products), 1)
 
     def test_missing_field_is_rejected(self):
-        data = jsonl_gz([{"type": "product", "id_product": 1}])
-        self.expect_get("catalog/v1/lorcana.jsonl.gz", data)
         with self.assertRaises(CatalogFilesError):
-            CatalogBucket(client=self.client).game_file("lorcana", self.entry(data))
+            self.parse(jsonl_gz([{"type": "product", "id_product": 1}]))
 
     def test_missing_bucket_setting_raises(self):
         with override_settings(CARDLEDGER_CATALOG_BUCKET=""):

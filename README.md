@@ -123,8 +123,9 @@ Expansions, categories and cards belong to a game and every lookup stays inside 
 
 Every night the Ledger rebuilds the catalog from the files of the generator
 [cardledger_database](https://github.com/gab-25/cardledger_database), kept in a private S3 bucket
-(`catalog/v1/manifest.json` and `catalog/v1/<slug>.jsonl.gz`). A game is imported only when its sha256 in the manifest
-changed. The nightly sync also downloads Cardmarket's public price guide of each game (low, trend, average and the
+(one `catalog/v1/<slug>.jsonl.gz` per game, no manifest). The generator is run by hand (`cardledger-db generate`, then
+`cardledger-db upload`). Every night the Ledger downloads each game's file and imports it only when the sha256 of its
+bytes differs from the one it last imported. The nightly sync also downloads Cardmarket's public price guide of each game (low, trend, average and the
 1/7/30-day averages, regular and foil or holo) and matches your cards to the catalog printings, game by game; it logs
 how many cards have no printing. Scryfall and Cardmarket's product lists are no longer read by the app, and no token
 is needed. The app only needs read access to the bucket (`s3:GetObject`, plus `s3:ListBucket` so a missing key is
@@ -149,16 +150,17 @@ uv run python manage.py sync_catalog                # queue a sync (outcome in S
 With Docker Compose the `worker` and `redis` services start with the stack; queue a sync with
 `docker compose exec cardledger python manage.py sync_catalog`.
 
-When the catalog files cannot be read (bucket not configured, unreadable manifest, a game missing from it or a corrupt
-file), the games that already have a catalog keep it as it is but still get the night's Cardmarket prices; their line
+When the catalog files cannot be read (bucket not configured, a game without its file in the bucket, a file that cannot
+be downloaded or a corrupt one), the games that already have a catalog keep it as it is but still get the night's Cardmarket prices; their line
 in the Activity log is a warning that tells why the catalog was not updated. A game that fails for any other reason is
 rolled back without stopping the others.
 
 ### Deploying this version
 
 - Set the `CARDLEDGER_CATALOG_*` variables (bucket, region, access key and secret, plus the endpoint for
-  S3-compatible storage) on the worker, where the sync runs, and let the generator publish its files to the bucket first: without
-  them the catalog is not rebuilt (Magic's prices still are).
+  S3-compatible storage) on the worker, where the sync runs, and upload the generator's files to the bucket first
+  (`cardledger-db generate` then `cardledger-db upload`; no manifest is needed): without them the catalog is not
+  rebuilt (Magic's prices still are).
 - Restart the app and the worker together: the app applies the migrations when it starts, and an old worker running
   the sync after them would fail.
 - Rolling back below migration `0028` is clean only before the first multi-game sync, or after deleting the

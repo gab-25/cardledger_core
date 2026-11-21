@@ -1,14 +1,15 @@
 """Nightly catalog sync: each game's catalog from the generator's files on S3, its prices from Cardmarket.
 
 cardledger_database generates one file per game (expansions and Cardmarket products, with set code, collector number,
-rarity and images) and a manifest with their checksums (ledger/catalog_files.py); a game's file is imported only when
-its checksum changed. Cardmarket's public price guide of each game gives the prices, every night. Then the Ledger's
+rarity and images; ledger/catalog_files.py), with no manifest: each game's file is downloaded every night and imported
+only when the sha256 of its bytes differs from the one last imported. Cardmarket's public price guide of each game gives the prices, every night. Then the Ledger's
 cards of that game are aligned with the catalog (catalog.reconcile_cards). One SyncLog line per game.
 
-A game whose file cannot be read (no bucket, bad manifest, corrupt file) keeps its catalog but still gets its prices
+A game whose file cannot be read (no bucket, no file for it, corrupt file) keeps its catalog but still gets its prices
 when it has a catalog; a game that fails for any other reason is rolled back without stopping the others.
 """
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -128,8 +129,7 @@ def _import(game, file):
     Category.objects.filter(game=game, blueprints__isnull=True).delete()
     Expansion.objects.filter(game=game, blueprints__isnull=True).delete()
     game.catalog_sha256 = file.sha256
-    game.catalog_generated_at = file.generated_at
-    game.save(update_fields=["catalog_sha256", "catalog_generated_at"])
+    game.save(update_fields=["catalog_sha256"])
     return pruned
 
 
@@ -150,18 +150,18 @@ def _failure(game, error, unexpected=False):
                       reconciled=catalog.ReconcileResult(), guide_date=None, error=error, unexpected=unexpected)
 
 
-def _game_file(bucket, game, entry):
-    """game's file when it changed (None: unchanged), checked."""
-    if not isinstance(entry, dict):
-        raise CatalogSyncError("not in the catalog manifest" if entry is None else "invalid manifest entry")
-    if game.catalog_sha256 and entry.get("sha256") == game.catalog_sha256:
+def _game_file(bucket, game):
+    """game's file when its bytes changed (None: unchanged), checked."""
+    data = bucket.fetch(game.slug)
+    if game.catalog_sha256 and hashlib.sha256(data).hexdigest() == game.catalog_sha256:
         return None
-    file = bucket.game_file(game.slug, entry)
+    file = bucket.parse(game.slug, data)
+    del data
     _check(file)
     return file
 
 
-def _sync_game(bucket, cm_client, game, entry, problem=""):
+def _sync_game(bucket, cm_client, game, problem=""):
     """Import game's file when it changed and its prices, then align its cards. Everything is downloaded before
     anything is written, and written in one transaction. A file that cannot be read (or the problem that kept the
     whole catalog from being read) leaves the game's catalog as it was, but a game that has one still gets its
@@ -170,7 +170,7 @@ def _sync_game(bucket, cm_client, game, entry, problem=""):
         file, error = None, problem
         if not error:
             try:
-                file = _game_file(bucket, game, entry)
+                file = _game_file(bucket, game)
             except (CatalogSyncError, CatalogFilesError) as exc:
                 error = str(exc)
         if error and not Expansion.objects.filter(game=game).exists():
@@ -203,18 +203,9 @@ def sync(bucket, cm_client, problem=""):
 
     bucket None (or a problem) means the catalog files cannot be read: only the prices of the games that have a
     catalog are updated, and every result carries the problem."""
-    games = {}
     if not problem and bucket is None:
         problem = "no catalog bucket"
-    if not problem:
-        try:
-            games = bucket.manifest().get("games")
-            if not isinstance(games, dict):
-                raise CatalogSyncError("the catalog manifest has no games")
-        except (CatalogSyncError, CatalogFilesError) as exc:
-            problem, games = str(exc), {}
-    return [_sync_game(bucket, cm_client, game, games.get(game.slug), problem)
-            for game in Game.objects.order_by("slug")]
+    return [_sync_game(bucket, cm_client, game, problem) for game in Game.objects.order_by("slug")]
 
 
 def _summary(name, result):
