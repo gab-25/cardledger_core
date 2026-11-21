@@ -121,11 +121,12 @@ The Ledger holds the catalog of six games: Magic, Pokémon, Lorcana, One Piece, 
 Expansions, categories and cards belong to a game and every lookup stays inside one game. The catalog API takes
 `?game=<slug>` (`mtg` by default); users still see only Magic until the UI lets them choose the game.
 
-The Ledger rebuilds the catalog from the files of the generator
+Every night the Ledger rebuilds the catalog from the files of the generator
 [cardledger_database](https://github.com/gab-25/cardledger_database), kept in a private S3 bucket
-(one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest). The generator is run by hand (`cardledger-db generate`, then
-`cardledger-db upload`). The catalog sync is run by hand (`sync_catalog`, see below): it downloads each game's file and
-imports it only when the sha256 of its bytes differs from the one it last imported. It also downloads Cardmarket's public price guide of each game (low, trend, average and the
+(one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest). The generator is
+run by hand (`cardledger-db generate`, then `cardledger-db upload`). Every night the Ledger downloads each game's file
+and imports it only when the sha256 of its bytes differs from the one it last imported. The nightly sync also downloads
+Cardmarket's public price guide of each game (low, trend, average and the
 1/7/30-day averages, regular and foil or holo) and matches your cards to the catalog printings, game by game; it logs
 how many cards have no printing. Scryfall and Cardmarket's product lists are no longer read by the app, and no token
 is needed. The app only needs read access to the bucket (`s3:GetObject`, plus `s3:ListBucket` so a missing key is
@@ -138,9 +139,8 @@ reported as missing).
 - **Listing form**: the Cardmarket trend (foil trend for foil copies) is shown and prefills the price of a new
   listing.
 
-The sync runs on a Celery worker (Redis broker) and is started by hand: `sync_catalog` queues it. Run it after
-uploading new generator files, and whenever you want fresh prices: Cardmarket regenerates the price guide once a day
-(around 02:45 CET), and prices change only when the sync runs.
+The sync runs on a Celery worker (Redis broker). `sync_catalog` only queues it; schedule it every night after
+03:00 (Cardmarket regenerates the price guide around 02:45 CET) with the scheduler of your choice.
 
 ```bash
 docker compose up -d redis
@@ -152,7 +152,7 @@ With Docker Compose the `worker` and `redis` services start with the stack; queu
 `docker compose exec cardledger python manage.py sync_catalog`.
 
 When the catalog files cannot be read (bucket not configured, a game without its file in the bucket, a file that cannot
-be downloaded or a corrupt one), the games that already have a catalog keep it as it is but still get Cardmarket's current prices; their line
+be downloaded or a corrupt one), the games that already have a catalog keep it as it is but still get the night's Cardmarket prices; their line
 in the Activity log is a warning that tells why the catalog was not updated. A game that fails for any other reason is
 rolled back without stopping the others.
 
@@ -193,8 +193,8 @@ are created as *To publish*).
 - OpenRouter is configured only on the server, through `OPENROUTER_API_KEY` (it cannot be set from the profile);
   `OPENROUTER_MODEL` picks the vision model (e.g. `qwen/qwen3.8-flash`) and has no default: card recognition
   needs both.
-- The catalog and prices are loaded and refreshed by the catalog sync, run by hand
-  (`uv run python manage.py sync_catalog`); run it once after the first migrate.
+- The catalog is loaded and refreshed by the nightly sync (`uv run python manage.py sync_catalog`); run it once after
+  the first migrate.
 - The camera works on **smartphones only** (webcams can't focus on a card up close). A session started on a
   computer shows a **QR code** that opens the same session on the phone; Review, confirmation and search work on
   both.

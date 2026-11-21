@@ -1,7 +1,7 @@
 """Cardmarket's daily price guide of each game, and the price lookups of the Ledger's cards.
 
 A catalog blueprint is a Cardmarket product, so its id is the row of the price guide. The guides are downloaded by
-the catalog sync (ledger/catalog_sync.py).
+the nightly catalog sync (ledger/catalog_sync.py).
 """
 
 from datetime import datetime

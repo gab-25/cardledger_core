@@ -29,7 +29,7 @@ uv run python manage.py makemigrations --check --dry-run
 uv run python manage.py spectacular --validate --fail-on-warn --file /dev/null   # OpenAPI schema check
 
 docker compose up -d redis && uv run celery -A config worker --loglevel=info     # catalog sync worker
-uv run python manage.py sync_catalog             # queue the catalog + price sync, run by hand (run it right after
+uv run python manage.py sync_catalog             # queue the nightly catalog + price sync (run it right after
                                                  # the first migrate: the catalog starts empty)
 ```
 
@@ -56,11 +56,11 @@ There is no linter or formatter configured. Settings come only from the environm
   its Cardmarket product id (`cm_product`, also the row of its Cardmarket price). **Games**: `Game` (mtg, pokemon,
   lorcana, onepiece, yugioh, riftbound); `Expansion`, `Category` and `Card` belong to a game, uniqueness is per game,
   and every catalog lookup (recognition, reconcile, resolve_blueprints, API) stays inside one game; the catalog API
-  takes `?game=` (default `mtg`). The catalog is rebuilt only by `ledger/catalog_sync.py`, run by hand (`sync_catalog`, no cron), with no
+  takes `?game=` (default `mtg`). The catalog is rebuilt only by the nightly `ledger/catalog_sync.py`, with no
   CardTrader token: it imports the files of the separate generator repo gab-25/cardledger_database from a private
   S3 bucket (`ledger/catalog_files.py`: one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest; the generator is run
   by hand, `cardledger-db generate` then `upload`; settings `CARDLEDGER_CATALOG_*`: bucket, endpoint, region, access
-  key and secret; `AWS_*` is never read): each game's file is downloaded on every sync and imported only when the
+  key and secret; `AWS_*` is never read): each game's file is downloaded every night and imported only when the
   sha256 of its bytes differs from `Game.catalog_sha256` (a missing file leaves that game's catalog as it is),
   and downloads Cardmarket's price guide per game (`ledger/cardmarket.py`, `-foil` or `-holo`). Scryfall and
   Cardmarket's product lists are not read by the app. `Category.is_single` tells cards from sealed products and
@@ -81,8 +81,8 @@ There is no linter or formatter configured. Settings come only from the environm
   with `@doc(tags, summary, request=..., parameters=...)`; request bodies are generated from the validating form with
   `form_body()`, so keep the form and the docs in sync through it. Responses are documented as a generic object.
   Swagger UI is public at `/api/docs/`, schema at `/api/schema/`, version read from `pyproject.toml`.
-- **Background work**: Celery with Redis, no beat; tasks (`ledger/tasks.py`) are only queued by management commands,
-  run by hand (no cron).
+- **Background work**: Celery with Redis, no beat; tasks (`ledger/tasks.py`) are only queued by management commands
+  and scheduled externally.
 
 ## Tests
 

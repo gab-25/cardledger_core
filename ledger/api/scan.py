@@ -41,7 +41,7 @@ def _openrouter_configured():
 def _missing_services(user):
     """What is missing before scanning: [(message, profile link or "")]. The catalog needs no token, only its sync."""
     if not Expansion.objects.filter(game=recognition.scan_game()).exists():
-        return [("The card catalog is empty: it is loaded by the catalog sync (manage.py sync_catalog).", "")]
+        return [("The card catalog is empty: it is loaded by the nightly catalog sync.", "")]
     return []
 
 
