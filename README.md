@@ -123,7 +123,7 @@ Expansions, categories and cards belong to a game and every lookup stays inside 
 
 The Ledger rebuilds the catalog from the files of the generator
 [cardledger_database](https://github.com/gab-25/cardledger_database), kept in a private S3 bucket
-(one `catalog/v1/<slug>.jsonl.gz` per game, no manifest). The generator is run by hand (`cardledger-db generate`, then
+(one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest). The generator is run by hand (`cardledger-db generate`, then
 `cardledger-db upload`). The catalog sync is run by hand (`sync_catalog`, see below): it downloads each game's file and
 imports it only when the sha256 of its bytes differs from the one it last imported. It also downloads Cardmarket's public price guide of each game (low, trend, average and the
 1/7/30-day averages, regular and foil or holo) and matches your cards to the catalog printings, game by game; it logs

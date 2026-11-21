@@ -1,5 +1,4 @@
 import copy
-import gzip
 import hashlib
 import io
 import json
@@ -71,29 +70,35 @@ POKEMON_GUIDE = {"version": 1, "createdAt": "2026-11-14T02:50:00+0100", "priceGu
 ]}
 
 
-def jsonl_gz(lines):
-    return gzip.compress("".join(json.dumps(x) + "\n" for x in lines).encode(), mtime=0)
+def catalog_json(rows):
+    """A game file as the generator writes it: one JSON object with the expansions and the products (the rows built
+    above carry a "type" only to tell them apart here)."""
+    doc = {
+        "expansions": [{k: v for k, v in r.items() if k != "type"} for r in rows if r["type"] == "expansion"],
+        "products": [{k: v for k, v in r.items() if k != "type"} for r in rows if r["type"] == "product"],
+    }
+    return json.dumps(doc, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
 
 
 class FakeBucket:
-    """A boto3 S3 client holding the generator's v1 files: one gzipped JSON lines file per game, no manifest."""
+    """A boto3 S3 client holding the generator's v1 files: one JSON document per game, no manifest."""
 
     def __init__(self):
         self.games = {"mtg": copy.deepcopy(MAGIC), "pokemon": copy.deepcopy(POKEMON)}
-        self.corrupt = set()  # slugs whose file is not gzip
+        self.corrupt = set()  # slugs whose file is not valid JSON
         self.denied = set()  # slugs whose file cannot be read (access denied)
-        self.empty = set()  # slugs whose object is zero bytes (e.g. a failed upload)
+        self.empty = set()  # slugs whose file holds no expansions and no products
         self.reads = []
 
     def _file(self, slug):
         if slug in self.empty:
-            return b""
-        return b"not a gzip file" if slug in self.corrupt else jsonl_gz(self.games[slug])
+            return catalog_json([])
+        return b"{not json" if slug in self.corrupt else catalog_json(self.games[slug])
 
     def get_object(self, Bucket, Key):
         assert Bucket == BUCKET
         self.reads.append(Key)
-        slug = Key.removeprefix("catalog/v1/").removesuffix(".jsonl.gz")
+        slug = Key.removeprefix("catalog/v1/").removesuffix(".json")
         if slug in self.denied:
             raise ClientError({"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}, "GetObject")
         if slug not in self.games:
@@ -262,7 +267,7 @@ class SyncTest(CatalogSyncTestCase):
 
     def test_game_file_missing_is_an_error(self):
         results = self.sync()
-        self.assertIn("No catalog file catalog/v1/lorcana.jsonl.gz", results["lorcana"].error)
+        self.assertIn("No catalog file catalog/v1/lorcana.json", results["lorcana"].error)
         self.assertFalse(results["lorcana"].unexpected)
         self.assertEqual(list(results), sorted(Game.objects.values_list("slug", flat=True)))
 
@@ -493,7 +498,7 @@ class RunSyncTest(CatalogSyncTestCase):
         before = SyncLog.objects.count()
         self.run_sync()
         logs = self.game_logs(before)
-        self.assertIn("Cannot read catalog/v1/mtg.jsonl.gz", logs["Magic: The Gathering"].message)
+        self.assertIn("Cannot read catalog/v1/mtg.json", logs["Magic: The Gathering"].message)
         self.assertEqual(logs["Magic: The Gathering"].level, SyncLog.Level.WARNING)
         self.assertEqual(CardmarketPrice.objects.get(pk=501201).trend, Decimal("2.50"))
         self.assertEqual(Blueprint.objects.get(cm_product_id=501201).name, "Counterspell")
@@ -502,7 +507,7 @@ class RunSyncTest(CatalogSyncTestCase):
     def test_unreadable_game_files_log_and_change_nothing(self):
         self.files.denied.update({"mtg", "pokemon"})
         self.run_sync()
-        self.assertIn("Cannot read catalog/v1/pokemon.jsonl.gz",
+        self.assertIn("Cannot read catalog/v1/pokemon.json",
                       SyncLog.objects.filter(message__startswith="Pokémon").latest("pk").message)
         self.assertFalse(Blueprint.objects.exists())
 

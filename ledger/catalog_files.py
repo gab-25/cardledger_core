@@ -1,6 +1,5 @@
 """Reads the catalog files (format v1) that cardledger_database generates, from S3: one file per game, no manifest."""
 
-import gzip
 import hashlib
 import json
 from dataclasses import dataclass
@@ -23,7 +22,7 @@ class CatalogFileMissing(CatalogFilesError):
 
 def catalog_key(slug):
     """Where a game's file is in the bucket, the same key the generator uploads it to."""
-    return f"catalog/v{FORMAT_VERSION}/{slug}.jsonl.gz"
+    return f"catalog/v{FORMAT_VERSION}/{slug}.json"
 
 
 @dataclass(frozen=True)
@@ -116,18 +115,14 @@ class CatalogBucket:
             raise CatalogFilesError(f"Cannot read {key}: {exc}") from exc
 
     def parse(self, slug, data):
-        """slug's file from its raw bytes (expansion lines, then product lines; other lines are ignored)."""
-        expansions, products = [], []
+        """slug's file from its raw bytes: one JSON object {"expansions": [...], "products": [...]} (other keys are
+        ignored)."""
         try:
-            for line in gzip.decompress(data).decode("utf-8").splitlines():
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                kind = row.get("type")
-                if kind == "expansion":
-                    expansions.append(_expansion(row))
-                elif kind == "product":
-                    products.append(_product(row))
-        except (OSError, EOFError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            doc = json.loads(data.decode("utf-8"))
+            if not isinstance(doc, dict):
+                raise TypeError("the document is not a JSON object")
+            expansions = [_expansion(row) for row in doc["expansions"]]
+            products = [_product(row) for row in doc["products"]]
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise CatalogFilesError(f"Invalid catalog file {catalog_key(slug)}: {exc}") from exc
         return GameFile(slug, hashlib.sha256(data).hexdigest(), expansions, products)

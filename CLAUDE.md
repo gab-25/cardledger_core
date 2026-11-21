@@ -58,7 +58,7 @@ There is no linter or formatter configured. Settings come only from the environm
   and every catalog lookup (recognition, reconcile, resolve_blueprints, API) stays inside one game; the catalog API
   takes `?game=` (default `mtg`). The catalog is rebuilt only by `ledger/catalog_sync.py`, run by hand (`sync_catalog`, no cron), with no
   CardTrader token: it imports the files of the separate generator repo gab-25/cardledger_database from a private
-  S3 bucket (`ledger/catalog_files.py`: one `catalog/v1/<slug>.jsonl.gz` per game, no manifest; the generator is run
+  S3 bucket (`ledger/catalog_files.py`: one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest; the generator is run
   by hand, `cardledger-db generate` then `upload`; settings `CARDLEDGER_CATALOG_*`: bucket, endpoint, region, access
   key and secret; `AWS_*` is never read): each game's file is downloaded on every sync and imported only when the
   sha256 of its bytes differs from `Game.catalog_sha256` (a missing file leaves that game's catalog as it is),
