@@ -1,8 +1,8 @@
-"""Nightly catalog sync: each game's catalog from the generator's files on S3, its prices from Cardmarket.
+"""Catalog sync, run by hand (`manage.py sync_catalog`): each game's catalog from the generator's files on S3, its prices from Cardmarket.
 
 cardledger_database generates one file per game (expansions and Cardmarket products, with set code, collector number,
-rarity and images; ledger/catalog_files.py), with no manifest: each game's file is downloaded every night and imported
-only when the sha256 of its bytes differs from the one last imported. Cardmarket's public price guide of each game gives the prices, every night. Then the Ledger's
+rarity and images; ledger/catalog_files.py), with no manifest: each game's file is downloaded on every sync and imported
+only when the sha256 of its bytes differs from the one last imported. Cardmarket's public price guide of each game gives the prices, on every sync. Then the Ledger's
 cards of that game are aligned with the catalog (catalog.reconcile_cards). One SyncLog line per game.
 
 A game whose file cannot be read (no bucket, no file for it, corrupt file) keeps its catalog but still gets its prices

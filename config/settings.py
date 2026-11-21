@@ -216,6 +216,6 @@ CARDLEDGER_CATALOG_REGION = os.environ.get('CARDLEDGER_CATALOG_REGION', '')
 CARDLEDGER_CATALOG_ACCESS_KEY_ID = os.environ.get('CARDLEDGER_CATALOG_ACCESS_KEY_ID', '')
 CARDLEDGER_CATALOG_SECRET_ACCESS_KEY = os.environ.get('CARDLEDGER_CATALOG_SECRET_ACCESS_KEY', '')
 
-# Celery (the catalog sync runs on a worker; scheduling is external, no beat)
+# Celery (the catalog sync runs on a worker, queued by hand with sync_catalog; no beat)
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_TASK_IGNORE_RESULT = True
