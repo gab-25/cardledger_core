@@ -300,6 +300,20 @@ class SyncTest(CatalogSyncTestCase):
         self.assertEqual(len(bp.image_url), 500)
         self.assertEqual(Expansion.objects.get(game=game(), code="dmr").name, "")
 
+    def test_long_set_codes_are_imported(self):
+        # The generator builds unique codes like "jump-shonen-jump-may-2010-subscription-b" (up to 40 characters).
+        code = "jump-shonen-jump-may-2010-subscription-b"
+        self.files.games["pokemon"].append(expansion(code, "Shonen Jump promos", None))
+        self.files.games["pokemon"].append(product(700099, "Promo", code, "1", 51, "Pokémon Single"))
+        results = self.sync()
+        self.assertEqual(results["pokemon"].error, "")
+        self.assertEqual(Blueprint.objects.get(cm_product_id=700099).expansion.code, code)
+
+    def test_set_codes_over_40_characters_skip_that_game(self):
+        self.files.games["pokemon"].append(expansion("x" * 41, "Too long", None))
+        results = self.sync()
+        self.assertIn("too long", results["pokemon"].error)
+
     def test_expansion_without_code_skips_that_game(self):
         self.files.games["pokemon"].append(expansion(None, "No code", None))
         results = self.sync()

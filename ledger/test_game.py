@@ -53,3 +53,11 @@ class GameTest(TestCase):
         self.assertFalse(Blueprint(expansion=expansion, name="Pikachu", category=single).is_product)
         self.assertTrue(Blueprint(expansion=expansion, name="Booster", category=sealed).is_product)
         self.assertFalse(Blueprint(expansion=expansion, name="Unknown").is_product)
+
+    def test_set_codes_up_to_40_characters(self):
+        code = "x" * 40
+        expansion = Expansion.objects.create(game=game(), code=code, name="Long")
+        card = Card.objects.create(game=game(), name="Card", set_code=code.upper(), collector_number="1")
+        expansion.refresh_from_db()
+        card.refresh_from_db()
+        self.assertEqual((expansion.code, card.set_code), (code, code.upper()))

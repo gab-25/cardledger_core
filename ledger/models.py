@@ -83,7 +83,7 @@ class Card(models.Model):
 
     game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="cards")
     name = models.CharField(max_length=200)
-    set_code = models.CharField(max_length=10)
+    set_code = models.CharField(max_length=40)
     collector_number = models.CharField(max_length=40, blank=True, default="")
     cm_product_id = models.PositiveIntegerField(
         "Cardmarket product", null=True, blank=True, db_index=True,
@@ -347,7 +347,7 @@ class Expansion(models.Model):
     """A set of a game (local catalog copy), e.g. an MTG set: its printings come from the generator files."""
 
     game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="expansions")
-    code = models.CharField(max_length=10, help_text="Set code, lower case, unique per game")
+    code = models.CharField(max_length=40, help_text="Set code, lower case, unique per game")
     name = models.CharField(max_length=200)
     released_at = models.DateField(null=True, blank=True)
     language = models.CharField(
