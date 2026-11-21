@@ -55,7 +55,10 @@ def is_single_category(name):
 
 
 def _check(file):
-    """Refuse a game file that cannot be written: a product of an unknown expansion, a set code missing or too long."""
+    """Refuse a game file that cannot be written: an empty file (e.g. a failed upload), a product of an unknown
+    expansion, a set code missing or too long."""
+    if not file.products:
+        raise CatalogSyncError("empty catalog file")
     codes = {e.code for e in file.expansions}
     if not all(isinstance(c, str) and c for c in codes):
         raise CatalogSyncError("expansions without a set code")

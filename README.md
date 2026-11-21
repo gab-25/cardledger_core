@@ -163,8 +163,9 @@ rolled back without stopping the others.
   rebuilt (Magic's prices still are).
 - Restart the app and the worker together: the app applies the migrations when it starts, and an old worker running
   the sync after them would fail.
-- Rolling back below migration `0028` is clean only before the first multi-game sync, or after deleting the
-  `Expansion`, `Category` and `Blueprint` rows of the games other than Magic.
+- Rolling back below migration `0028` (or `0032`, which allows set codes up to 40 characters) is clean only before
+  the first multi-game sync, or after deleting the `Expansion`, `Category`, `Blueprint` and `Card` rows of the games
+  other than Magic.
 
 ## Scanning cards with the camera
 

@@ -82,9 +82,12 @@ class FakeBucket:
         self.games = {"mtg": copy.deepcopy(MAGIC), "pokemon": copy.deepcopy(POKEMON)}
         self.corrupt = set()  # slugs whose file is not gzip
         self.denied = set()  # slugs whose file cannot be read (access denied)
+        self.empty = set()  # slugs whose object is zero bytes (e.g. a failed upload)
         self.reads = []
 
     def _file(self, slug):
+        if slug in self.empty:
+            return b""
         return b"not a gzip file" if slug in self.corrupt else jsonl_gz(self.games[slug])
 
     def get_object(self, Bucket, Key):
@@ -299,6 +302,21 @@ class SyncTest(CatalogSyncTestCase):
         self.assertEqual((bp.name, bp.collector_number, bp.rarity, bp.image_large_url), ("", "", "", ""))
         self.assertEqual(len(bp.image_url), 500)
         self.assertEqual(Expansion.objects.get(game=game(), code="dmr").name, "")
+
+    def test_empty_file_is_refused_and_retried(self):
+        self.sync()
+        sha = game("pokemon").catalog_sha256
+        self.files.empty.add("pokemon")
+        self.cm.guides[6]["priceGuides"][0]["trend"] = 3.0
+        results = self.sync()
+        self.assertIn("empty catalog file", results["pokemon"].error)
+        self.assertEqual(game("pokemon").catalog_sha256, sha)
+        self.assertTrue(Blueprint.objects.filter(cm_product_id=700001).exists())
+        self.assertEqual(CardmarketPrice.objects.get(pk=700001).trend, Decimal("3.00"))
+        self.files.empty.discard("pokemon")
+        self.files.games["pokemon"][2]["name"] = "Pikachu (new)"
+        self.assertEqual(self.sync()["pokemon"].error, "")
+        self.assertEqual(Blueprint.objects.get(cm_product_id=700001).name, "Pikachu (new)")
 
     def test_long_set_codes_are_imported(self):
         # The generator builds unique codes like "jump-shonen-jump-may-2010-subscription-b" (up to 40 characters).
