@@ -3,7 +3,8 @@
 cardledger_database generates one file per game (expansions and Cardmarket products, with set code, collector number,
 rarity and images; ledger/catalog_files.py), with no manifest: each game's file is downloaded every night and imported
 only when the sha256 of its bytes differs from the one last imported. Cardmarket's public price guide of each game gives the prices, every night. Then the Ledger's
-cards of that game are aligned with the catalog (catalog.reconcile_cards). One SyncLog line per game.
+cards of that game are aligned with the catalog (catalog.reconcile_cards). One report line per game (not in the
+SyncLog).
 
 A game whose file cannot be read (no bucket, no file for it, corrupt file) keeps its catalog but still gets its prices
 when it has a catalog; a game that fails for any other reason is rolled back without stopping the others.
@@ -21,7 +22,7 @@ from django.db import transaction
 from . import cardmarket, catalog
 from .cardmarket import PRICE_FIELDS, CardmarketError
 from .catalog_files import CatalogBucket, CatalogFilesError
-from .models import Blueprint, CardmarketPrice, Category, Expansion, Game, SyncLog
+from .models import Blueprint, CardmarketPrice, Category, Expansion, Game
 
 BATCH = 2000
 # A game's blueprints missing from its file are removed only when the file holds at least this share of that game's
@@ -232,11 +233,17 @@ def _summary(name, result):
     return message
 
 
-def run_sync(bucket=None, cm_client=None):
-    """sync() with its outcome written to the SyncLog, one line per game. Returns the results.
+def log_report(message, warning):
+    """The default report of run_sync: the Python log."""
+    (logger.warning if warning else logger.info)("%s", message)
 
-    Without a usable bucket the prices are still updated. Raises CatalogSyncError, after logging every game, when
-    a game failed unexpectedly, so the task is marked failed."""
+
+def run_sync(bucket=None, cm_client=None, report=log_report):
+    """sync() with its outcome told to report(message, warning), one line per game, not to the SyncLog.
+    Returns the results.
+
+    Without a usable bucket the prices are still updated. Raises CatalogSyncError, after reporting every game, when
+    a game failed unexpectedly, so the command fails."""
     problem = ""
     try:
         bucket = bucket if bucket is not None else CatalogBucket()
@@ -247,19 +254,15 @@ def run_sync(bucket=None, cm_client=None):
     try:
         results = sync(bucket, cm_client, problem)
     except Exception as exc:
-        # Unexpected (database, bug): still visible in the Activity log, and the task is marked failed.
-        logger.exception("Catalog sync failed")
-        SyncLog.objects.create(message=f"Catalog sync failed: {type(exc).__name__}: {exc}"[:300],
-                               level=SyncLog.Level.WARNING)
+        # Unexpected (database, bug): reported, and the command fails.
+        report(f"Catalog sync failed: {type(exc).__name__}: {exc}", True)
         raise
     finally:
         if own_cm:
             cm_client.close()
     names = dict(Game.objects.values_list("slug", "name"))
     for result in results:
-        warn = result.error or result.reconciled.clashes
-        SyncLog.objects.create(message=_summary(names[result.game], result)[:300],
-                               level=SyncLog.Level.WARNING if warn else SyncLog.Level.OK)
+        report(_summary(names[result.game], result), bool(result.error or result.reconciled.clashes))
     failed = [r.game for r in results if r.unexpected]
     if failed:
         raise CatalogSyncError(f"unexpected failure in: {', '.join(failed)}")

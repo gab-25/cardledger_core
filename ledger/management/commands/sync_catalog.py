@@ -1,14 +1,20 @@
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
-from ledger import tasks
+from ledger import catalog_sync
 
 
 class Command(BaseCommand):
     help = (
-        "Queue the catalog sync (the generator's catalog files and Cardmarket's prices of every game) "
-        "on the Celery worker."
+        "Run the catalog sync (the generator's catalog files and Cardmarket's prices of every game) "
+        "in this process; one line per game on stdout (stderr for warnings), nothing in the SyncLog."
     )
 
     def handle(self, *args, **options):
-        result = tasks.sync_catalog.delay()
-        self.stdout.write(f"Catalog sync queued (task {result.id})")
+        def report(message, warning):
+            (self.stderr if warning else self.stdout).write(message)
+
+        try:
+            results = catalog_sync.run_sync(report=report)
+        except catalog_sync.CatalogSyncError as exc:
+            raise CommandError(f"Catalog sync failed: {exc}") from exc
+        self.stdout.write(f"Catalog sync done ({len(results)} games)")
