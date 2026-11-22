@@ -10,6 +10,9 @@ def sessions_are_magic(apps, schema_editor):
         return
     magic = apps.get_model("ledger", "Game").objects.get(slug="mtg")
     ScanSession.objects.filter(game__isnull=True).update(game=magic)
+    # The rows just written must be checked now: PostgreSQL refuses to alter a table with pending trigger events.
+    # (Django's AddField already makes this one constraint immediate; this does not depend on that.)
+    schema_editor.execute("SET CONSTRAINTS ALL IMMEDIATE")
 
 
 class Migration(migrations.Migration):
