@@ -1,11 +1,12 @@
 """Turn what the vision model read on a card into a catalog printing (Blueprint)."""
 
+import re
 from dataclasses import dataclass, field
 
 from django.db.models import Q
 
 from . import catalog
-from .models import MAGIC, Blueprint, Game
+from .models import Blueprint
 
 MAX_CANDIDATES = 5
 
@@ -30,30 +31,25 @@ class Match:
     reason: str = "not_found"
 
 
-def scan_game():
-    """The game scanned: Magic, until a scan session has its own game."""
-    return Game.by_slug(MAGIC)
-
-
-def _catalog():
+def _catalog(game):
     """Every printing of the game scanned."""
-    return Blueprint.objects.filter(expansion__game=scan_game())
+    return Blueprint.objects.filter(expansion__game=game)
 
 
-def _scope(rec, expansion):
+def _scope(rec, expansion, game):
     """(blueprints to search, certain_allowed). Matches outside a known expansion are never certain."""
     code = rec.set_code.strip().lower()
     if expansion is not None and (not code or code == expansion.code):
         return Blueprint.objects.filter(expansion=expansion), True
     if code:
         # A printed code wins over the locked expansion: boosters hold bonus-sheet and List cards.
-        found = catalog.expansion_by_code(code, scan_game())
+        found = catalog.expansion_by_code(code, game)
         if found is not None:
             return Blueprint.objects.filter(expansion=found), True
     if expansion is not None:
         return Blueprint.objects.filter(expansion=expansion), False
     # No usable set code: search the whole local catalog of the game, and let the owner confirm.
-    return _catalog(), False
+    return _catalog(game), False
 
 
 def _by_name(qs, name):
@@ -69,10 +65,16 @@ def same_name(bp, name):
     return a == b or a.split(" // ")[0] == b
 
 
-def _candidates(scope, name, hits=()):
+def _number_hits(scope, number):
+    """Printings numbered `number` (normalized): the catalog keeps the generator's numbers, zero-padded or not
+    ("025"), so leading zeros and case are ignored on its side too."""
+    return scope.filter(collector_number__iregex=rf"^0*{re.escape(number)}$")
+
+
+def _candidates(scope, name, game, hits=()):
     """Cards with the name read first (number hits, then the scope, then anywhere if the scope has none),
     then number hits with another name. Within each group: by Cardmarket product id."""
-    named = list(_by_name(_catalog(), name).select_related("expansion"))
+    named = list(_by_name(_catalog(game), name).select_related("expansion"))
     in_scope = set(scope.filter(pk__in=[b.pk for b in named]).values_list("pk", flat=True))
     if in_scope:
         named = [b for b in named if b.pk in in_scope]
@@ -87,23 +89,24 @@ def _candidates(scope, name, hits=()):
     return sorted(named + others, key=rank)[:MAX_CANDIDATES]
 
 
-def match(rec, expansion):
-    scope, certain_allowed = _scope(rec, expansion)
+def match(rec, expansion, game):
+    """The printing of `game` that rec is; expansion: the session's locked one, or None."""
+    scope, certain_allowed = _scope(rec, expansion, game)
     number = catalog.normalize_number(rec.collector_number)
     certain = None
 
     if number:
-        hits = list(scope.filter(collector_number=number).select_related("expansion"))
+        hits = list(_number_hits(scope, number).select_related("expansion"))
         named_hits = [h for h in hits if rec.name and same_name(h, rec.name)]
         if len(named_hits) == 1 or (len(hits) == 1 and not rec.name.strip()):
             certain = (named_hits or hits)[0]
         elif hits:
-            return Match(None, _candidates(scope, rec.name, hits), "ambiguous")
+            return Match(None, _candidates(scope, rec.name, game, hits), "ambiguous")
 
     if certain is None:
         named = list(_by_name(scope, rec.name).select_related("expansion")[:2])
         if len(named) != 1:
-            candidates = _candidates(scope, rec.name)
+            candidates = _candidates(scope, rec.name, game)
             return Match(None, candidates, "ambiguous" if candidates else "not_found")
         certain = named[0]
 

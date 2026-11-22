@@ -12,12 +12,21 @@ class ScanTestCase(LedgerTestCase):
         load_catalog()
         self.dmr = Expansion.objects.get(code="dmr")
         self.bolt = Blueprint.objects.get(cm_product_id=cm_id(1201))  # Counterspell DMR #45
-        self.session = scan.start_session(self.user, self.dmr, "NM")
+        self.session = scan.start_session(self.user, game("mtg"), self.dmr, "NM")
 
     def capture(self, capture_id, *, language="IT", foil=False, certain=True):
         rec = Recognition(name="Counterspell", language=language, foil=foil)
         m = Match(self.bolt, [self.bolt], "ok") if certain else Match(None, [self.bolt], "ambiguous")
         return scan.add_capture(self.session, rec, m, frame=b"jpeg", capture_id=capture_id)
+
+
+class SessionGameTest(ScanTestCase):
+    def test_session_has_its_game(self):
+        self.assertEqual(self.session.game.slug, "mtg")
+        pokemon = scan.start_session(self.user, game("pokemon"), None, "NM")
+        self.assertEqual(pokemon.game.slug, "pokemon")
+        self.assertEqual(list(scan.open_sessions(self.user, game("pokemon"))), [pokemon])
+        self.assertEqual(set(scan.open_sessions(self.user)), {self.session, pokemon})
 
 
 class CaptureTest(ScanTestCase):
@@ -99,7 +108,7 @@ class SaveTest(ScanTestCase):
 
     def test_save_adds_to_own_item_for_same_printing(self):
         mine = self.printing(quantity=2)
-        friend_session = scan.start_session(self.other, self.dmr, "NM")
+        friend_session = scan.start_session(self.other, game("mtg"), self.dmr, "NM")
         rec = Recognition(name="Counterspell", language="IT")
         scan.add_capture(friend_session, rec, Match(self.bolt, [self.bolt], "ok"), frame=b"jpeg", capture_id="f")
         scan.save_session(friend_session)

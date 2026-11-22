@@ -6,7 +6,8 @@ from django.urls import reverse
 from .tests import LedgerTestCase
 
 # Url names of the views that take ?game; every task that adds one appends it here.
-GAME_VIEWS = ["ledger:api_catalog", "ledger:api_collection", "ledger:api_export", "ledger:api_listings", "accounts:api_me"]
+GAME_VIEWS = ["ledger:api_catalog", "ledger:api_collection", "ledger:api_export", "ledger:api_listings", "accounts:api_me",
+             "ledger:scan_api_setup", "ledger:scan_api_sessions"]
 
 
 class GamesApiTest(LedgerTestCase):

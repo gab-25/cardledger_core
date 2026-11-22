@@ -11,7 +11,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from ..models import MAGIC, Blueprint, Condition, Expansion, Language, ScanLine, ScanSession
+from ..models import MAGIC, Blueprint, Condition, Expansion, Game, Language, ScanLine, ScanSession
 from ..recognition import same_name
 from . import pages
 
@@ -107,6 +107,7 @@ class LineSerializer(serializers.ModelSerializer):
 class SessionSerializer(serializers.ModelSerializer):
     """A scan session, as seen by the device asking (context["request"])."""
 
+    game = serializers.SlugRelatedField(slug_field="slug", read_only=True, help_text="Slug of the game scanned")
     expansion = ExpansionSerializer(allow_null=True, read_only=True)
     count = serializers.SerializerMethodField(help_text="Cards scanned, counting every copy")
     last_line = serializers.SerializerMethodField(help_text="The card added or changed last")
@@ -116,7 +117,7 @@ class SessionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ScanSession
-        fields = ["uuid", "status", "expansion", "default_condition", "count", "last_line",
+        fields = ["uuid", "status", "game", "expansion", "default_condition", "count", "last_line",
                   "is_phone", "phone_url", "phone_secure"]
         read_only_fields = fields
 
@@ -137,7 +138,7 @@ class SessionSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(OpenApiTypes.URI)
     def get_phone_url(self, session):
-        return self.context["request"].build_absolute_uri(pages.scan_camera(session.uuid))
+        return self.context["request"].build_absolute_uri(pages.scan_camera(session))
 
     def get_phone_secure(self, session) -> bool:
         return self.context["request"].is_secure()
@@ -233,12 +234,24 @@ class SaveResultSerializer(serializers.Serializer):
 
 
 class SessionCreateSerializer(serializers.Serializer):
+    game = serializers.SlugRelatedField(
+        slug_field="slug", queryset=Game.objects.all(), required=False, allow_null=True, default=None,
+        error_messages={"does_not_exist": "Unknown game '{value}'."},
+        help_text=f"Slug of the game to scan (default {MAGIC})",
+    )
     expansion_id = serializers.PrimaryKeyRelatedField(
-        queryset=Expansion.objects.filter(game__slug=MAGIC), allow_null=True, required=False, default=None,
-        help_text="The expansion to scan; null for all expansions",
+        queryset=Expansion.objects.all(), allow_null=True, required=False, default=None,
+        help_text="The expansion to scan, one of the game's; null for all expansions",
     )
     condition = serializers.ChoiceField(Condition.choices, default=Condition.NEAR_MINT,
                                         help_text="The default condition of the scanned cards")
+
+    def validate(self, attrs):
+        attrs["game"] = attrs["game"] or Game.by_slug(MAGIC)
+        expansion = attrs["expansion_id"]
+        if expansion is not None and expansion.game_id != attrs["game"].pk:
+            raise serializers.ValidationError({"expansion_id": [f"Not an expansion of {attrs['game'].name}."]})
+        return attrs
 
 
 class CaptureSerializer(serializers.Serializer):
@@ -259,13 +272,20 @@ class SearchQuerySerializer(serializers.Serializer):
 
 
 class PickSerializer(serializers.Serializer):
+    """Needs context["game"]: the game of the session, the only one whose printings can be picked."""
+
     blueprint_id = serializers.SlugRelatedField(
-        slug_field="cm_product_id",  # scanning is Magic only, until a scan session has its own game
-        queryset=Blueprint.objects.select_related("expansion").filter(expansion__game__slug=MAGIC),
-        help_text="Cardmarket product id",
+        slug_field="cm_product_id", queryset=Blueprint.objects.select_related("expansion"),
+        help_text="Cardmarket product id, of a printing of the session's game",
     )
     language = LanguageField()
     foil = serializers.BooleanField(default=False)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        game = self.context.get("game")  # absent only when the OpenAPI schema is generated
+        qs = Blueprint.objects.select_related("expansion")
+        self.fields["blueprint_id"].queryset = qs.filter(expansion__game=game) if game is not None else qs.none()
 
 
 class ConfirmSerializer(PickSerializer):

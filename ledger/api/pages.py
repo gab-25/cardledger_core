@@ -4,5 +4,11 @@ COLLECTION = "/"
 PROFILE_CARDTRADER = "/account/#cardtrader"
 
 
-def scan_camera(uuid):
-    return f"/scan/{uuid}/"
+def collection(game):
+    """The collection page of a game."""
+    return f"/{game.slug}/"
+
+
+def scan_camera(session):
+    """The camera page of a scan session, under its game."""
+    return f"/{session.game.slug}/scan/{session.uuid}/"

@@ -391,14 +391,14 @@ class PruneTest(CatalogSyncTestCase):
 
     def test_blueprint_of_an_open_scan_line_is_kept(self):
         bp = self.old_blueprint(888002)
-        session = ScanSession.objects.create(owner=self.user)
+        session = ScanSession.objects.create(owner=self.user, game=game())
         ScanLine.objects.create(session=session, blueprint=bp, condition="NM", language="EN")
         self.sync()
         self.assertTrue(Blueprint.objects.filter(cm_product_id=888002).exists())
 
     def test_saved_scan_line_keeps_its_history_without_the_blueprint(self):
         bp = self.old_blueprint(888003)
-        session = ScanSession.objects.create(owner=self.user, status=ScanSession.Status.SAVED)
+        session = ScanSession.objects.create(owner=self.user, game=game(), status=ScanSession.Status.SAVED)
         line = ScanLine.objects.create(session=session, blueprint=bp, condition="NM", language="EN")
         self.sync()
         line.refresh_from_db()
