@@ -3,9 +3,27 @@ import json
 import httpx
 from django.test import SimpleTestCase
 
-from .openrouter import SCHEMA, OpenRouterClient, OpenRouterError
+from .openrouter import SCHEMA, OpenRouterClient, OpenRouterError, prompt_for
 
 READ = {"name": "Counterspell", "set_code": "DMR", "collector_number": "045", "language": "IT", "foil": True}
+
+
+GAMES = {"mtg": "Magic: The Gathering", "pokemon": "Pokémon", "lorcana": "Disney Lorcana", "onepiece": "One Piece",
+         "yugioh": "Yu-Gi-Oh!", "riftbound": "Riftbound"}
+
+# The Magic prompt as it was before prompts per game: it must not change.
+MAGIC_PROMPT = (
+    "You are looking at a photo of one Magic: The Gathering card. Read it and answer with JSON only.\n"
+    "- name: the card's ENGLISH name, even when the card is printed in another language.\n"
+    "- set_code: the expansion code printed at the bottom left (e.g. DSK), or empty if not visible.\n"
+    "- collector_number: the collector number printed at the bottom left without the total "
+    "(\"0187/0286\" -> \"0187\"), or empty if not visible.\n"
+    "- language: the language the card is printed in, one of EN, IT, DE, FR, ES, PT, JP, KO, ZHS, RU; "
+    "empty if unreadable or another language.\n"
+    "- foil: true if the card is foil (holographic sheen, star next to the set code).\n"
+    "Never guess a collector number you cannot read. "
+    "If the photo shows no Magic card (or it is unreadable), answer with an empty name and empty fields."
+)
 
 
 def completion(content):
@@ -61,3 +79,31 @@ class RecognizeTest(SimpleTestCase):
 
     def test_schema_has_no_color_or_type(self):
         self.assertEqual(SCHEMA["required"], ["name", "set_code", "collector_number", "language", "foil"])
+
+
+class PromptTest(SimpleTestCase):
+    def test_magic_prompt_unchanged(self):
+        self.assertEqual(prompt_for("mtg"), MAGIC_PROMPT)
+
+    def test_each_game_has_its_prompt(self):
+        for slug, name in GAMES.items():
+            with self.subTest(slug):
+                prompt = prompt_for(slug)
+                self.assertIn(name, prompt)
+                if slug != "mtg":
+                    self.assertNotIn("Magic", prompt)
+                    self.assertIn("JSON only", prompt)
+        self.assertEqual(len({prompt_for(slug) for slug in GAMES}), len(GAMES))
+
+    def test_request_uses_the_game_prompt(self):
+        seen = {}
+
+        def handler(request):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json=completion(json.dumps(READ)))
+
+        client = OpenRouterClient("key", model="test/model", transport=httpx.MockTransport(handler))
+        client.recognize_card(b"x", "pokemon")
+        self.assertEqual(seen["body"]["messages"][0]["content"][0]["text"], prompt_for("pokemon"))
+        client.recognize_card(b"x")
+        self.assertEqual(seen["body"]["messages"][0]["content"][0]["text"], MAGIC_PROMPT)

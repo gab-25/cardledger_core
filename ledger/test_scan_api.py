@@ -35,6 +35,7 @@ class FakeRecognizer:
         self.result = Recognition(name="Counterspell", set_code="dmr", collector_number="045", language="IT")
         self.error = None
         self.calls = 0
+        self.games = []
 
     def __enter__(self):
         return self
@@ -42,8 +43,9 @@ class FakeRecognizer:
     def __exit__(self, *exc):
         pass
 
-    def recognize_card(self, image):
+    def recognize_card(self, image, game_slug="mtg"):
         self.calls += 1
+        self.games.append(game_slug)
         if self.error:
             raise self.error
         return self.result
@@ -669,6 +671,7 @@ class ScanGameTest(ScanApiBase):
         resp = self.capture(session)
         self.assertEqual(resp.json()["result"], "added", resp.content)
         self.assertEqual(ScanLine.objects.get(session=session).blueprint.cm_product_id, 700001)
+        self.assertEqual(self.recognizer.games, ["pokemon"])
 
     def test_capture_in_magic_session_ignores_other_games(self):
         _, session = self.start_in("mtg")

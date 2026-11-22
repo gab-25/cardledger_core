@@ -195,7 +195,7 @@ def captures(request, uid):
         image = data["frame"].read()
         try:
             with services.make_openrouter() as model:
-                rec = model.recognize_card(image)
+                rec = model.recognize_card(image, session.game.slug)
             if not rec.name and not rec.collector_number:  # an empty table, a hand, a blurred frame
                 scan.release_capture(capture)
                 return _capture_result("no_card", "No card in the picture — frame a card", session)
