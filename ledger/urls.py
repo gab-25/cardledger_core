@@ -2,6 +2,7 @@ from django.urls import path
 
 from .api import catalog as catalog_api
 from .api import collection as collection_api
+from .api import games as games_api
 from .api import orders as orders_api
 from .api import sale as sale_api
 from .api import scan as scan_api
@@ -11,6 +12,7 @@ app_name = "ledger"
 
 urlpatterns = [
     path("api/choices/", collection_api.choices, name="api_choices"),
+    path("api/games/", games_api.games, name="api_games"),
     path("api/collection/", collection_api.collection, name="api_collection"),
     path("api/collection/<int:pk>/", collection_api.item, name="api_item"),
     path("api/collection/import/", collection_api.import_csv, name="api_import"),
