@@ -55,10 +55,10 @@ def _scope(rec, expansion, game):
 def _suffixed(game):
     """Other games' catalog names carry a suffix the card does not print (Pokémon attacks "[...]", One Piece code
     "(...)"). Magic's suffixes (tokens, versions, art series) tell printings apart: never stripped."""
-    return game is None or game.slug != "mtg"
+    return game.slug != "mtg"
 
 
-def _by_name(qs, name, game=None):
+def _by_name(qs, name, game):
     name = name.strip()
     if not name:
         return qs.none()
@@ -68,7 +68,7 @@ def _by_name(qs, name, game=None):
     return qs.filter(cond)
 
 
-def same_name(bp, name, game=None):
+def same_name(bp, name, game):
     """The printing carries the name read (for a split card, its front face; outside Magic, without its
     trailing " [...]" or "(...)")."""
     a, b = bp.name.casefold(), name.strip().casefold()

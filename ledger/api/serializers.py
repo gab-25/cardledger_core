@@ -75,7 +75,7 @@ class CandidateSerializer(BlueprintSerializer):
 
     def get_matches_name(self, bp) -> bool:
         name = self.context.get("read_name", "")
-        return bool(name) and same_name(bp, name)
+        return bool(name) and same_name(bp, name, bp.expansion.game)
 
 
 class LineSerializer(serializers.ModelSerializer):
@@ -99,7 +99,7 @@ class LineSerializer(serializers.ModelSerializer):
         if not (line.needs_confirmation and line.candidates):
             return []
         by_id = {b.cm_product_id: b for b in
-                 Blueprint.objects.filter(cm_product_id__in=line.candidates).select_related("expansion")}
+                 Blueprint.objects.filter(cm_product_id__in=line.candidates).select_related("expansion__game")}
         return CandidateSerializer([by_id[i] for i in line.candidates if i in by_id], many=True,
                                    context={"read_name": line.read_name}).data
 

@@ -189,3 +189,24 @@ class OtherGamesNamesTest(LedgerTestCase):
         self.assertIsNone(catalog.expansion_by_code("agov", self.yugioh))
         exact = Expansion.objects.create(game=self.yugioh, code="agov", name="Exact")
         self.assertEqual(catalog.expansion_by_code("agov", self.yugioh), exact)
+
+
+class CandidateMatchesNameTest(LedgerTestCase):
+    """The serializer compares the name read with the candidate's game: Magic suffixes are never stripped."""
+
+    def matches(self, bp, name):
+        from .api.serializers import CandidateSerializer
+        return CandidateSerializer(bp, context={"read_name": name}).data["matches_name"]
+
+    def test_magic_candidate_keeps_its_suffix(self):
+        load_catalog()
+        neo = Expansion.objects.get(code="neo")
+        bp = Blueprint.objects.create(cm_product_id=900010, expansion=neo, collector_number="T2",
+                                      name="Spirit Token (White 1/1)")
+        self.assertFalse(self.matches(bp, "Spirit Token"))
+
+    def test_pokemon_candidate_matches_without_attacks(self):
+        pal = Expansion.objects.create(game=game("pokemon"), code="pal", name="Paldea Evolved")
+        bp = Blueprint.objects.create(cm_product_id=900011, expansion=pal, collector_number="21",
+                                      name="Arboliva [Enriching Oil | Solar Beam]")
+        self.assertTrue(self.matches(bp, "Arboliva"))
