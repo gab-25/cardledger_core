@@ -650,7 +650,7 @@ class SchemaTest(LedgerTestCase):
             return {p["name"] for p in schema["paths"][path]["get"].get("parameters", []) if p["in"] == "query"}
 
         self.assertEqual(query("/api/collection/"), {"q", "foil", "set", "cond", "category", "game", "page"})
-        self.assertEqual(query("/api/listings/"), {"status"})
+        self.assertEqual(query("/api/listings/"), {"status", "game"})
         self.assertEqual(query("/api/orders/"), {"tab"})
         self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "game", "category", "owned", "page"})
         self.assertEqual(query("/api/catalog/categories/"), {"game"})

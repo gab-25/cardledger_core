@@ -414,12 +414,13 @@ class PublishResult:
     failed: list = field(default_factory=list)  # [(listing, reason)]
 
 
-def publish_pending(user):
-    """Push every listing of the user waiting to be published to their CardTrader account."""
+def publish_pending(user, game=None):
+    """Push the listings of the user waiting to be published (of one game, or of all) to their CardTrader account."""
     service = get_cardtrader(user)
-    listings = list(
-        Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH).select_related("item__card")
-    )
+    pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
+    if game is not None:
+        pending = pending.filter(item__card__game=game)
+    listings = list(pending.select_related("item__card"))
     result = PublishResult()
     if not listings:
         return result

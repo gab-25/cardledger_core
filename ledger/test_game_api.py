@@ -4,7 +4,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 
 from . import services
-from .models import Blueprint, Card, Category, CollectionItem, Expansion
+from .models import Blueprint, Card, Category, CollectionItem, Expansion, Listing
 from .tests import LedgerTestCase, game, load_catalog
 
 
@@ -72,3 +72,33 @@ class CollectionGameTest(LedgerTestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual({c.game.slug for c in Card.objects.filter(name="Pikachu", set_code="SV1")}, {"pokemon"})
         self.assertEqual(CollectionItem.objects.filter(owner=self.user, card__name="Pikachu").count(), 2)
+
+
+class SaleGameTest(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        load_catalog()
+        self.expansion, self.blueprint, self.item = pokemon_setup(self)
+        self.listing = Listing.objects.create(item=self.item, price="1.00", quantity=1,
+                                              status=Listing.Status.TO_PUBLISH)
+
+    def test_listings_per_game(self):
+        resp = self.client.get(reverse("ledger:api_listings"), {"game": "pokemon"})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual([r["name"] for r in data["results"]], ["Pikachu"])
+        self.assertEqual(data["stats"]["to_publish"], 1)
+        data = self.client.get(reverse("ledger:api_listings")).json()
+        self.assertNotIn("Pikachu", [r["name"] for r in data["results"]])
+
+    def test_publish_only_the_game(self):
+        self.assertTrue(Listing.objects.owned_by(self.user).filter(status=Listing.Status.TO_PUBLISH)
+                        .exclude(pk=self.listing.pk).exists())
+        resp = self.client.post(reverse("ledger:api_publish") + "?game=mtg")
+        self.assertEqual(resp.status_code, 200)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, Listing.Status.TO_PUBLISH)
+
+    def test_listing_detail_has_game(self):
+        resp = self.client.get(reverse("ledger:api_listing", args=[self.item.pk]))
+        self.assertEqual(resp.json()["game"], "pokemon")
