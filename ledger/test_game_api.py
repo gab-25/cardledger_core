@@ -106,15 +106,21 @@ class SaleGameTest(LedgerTestCase):
         self.assertEqual(self.listing.status, Listing.Status.TO_PUBLISH)
         self.assertFalse(Listing.objects.filter(pk__in=magic_ids, status=Listing.Status.TO_PUBLISH).exists())
 
-    def test_publish_without_game_is_magic(self):
+    def _assert_publishes_every_game(self, url):
         magic_ids = list(Listing.objects.owned_by(self.user).filter(status=Listing.Status.TO_PUBLISH)
                          .exclude(pk=self.listing.pk).values_list("pk", flat=True))
         self.assertTrue(magic_ids)
-        resp = self.client.post(reverse("ledger:api_publish"))
-        self.assertEqual(resp.status_code, 200)
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 200, resp.content)
         self.listing.refresh_from_db()
-        self.assertEqual(self.listing.status, Listing.Status.TO_PUBLISH)
+        self.assertNotEqual(self.listing.status, Listing.Status.TO_PUBLISH)
         self.assertFalse(Listing.objects.filter(pk__in=magic_ids, status=Listing.Status.TO_PUBLISH).exists())
+
+    def test_publish_without_game_publishes_every_game(self):
+        self._assert_publishes_every_game(reverse("ledger:api_publish"))
+
+    def test_publish_with_blank_game_publishes_every_game(self):
+        self._assert_publishes_every_game(reverse("ledger:api_publish") + "?game=")
 
     def test_listing_detail_has_game(self):
         resp = self.client.get(reverse("ledger:api_listing", args=[self.item.pk]))

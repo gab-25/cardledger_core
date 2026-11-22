@@ -57,9 +57,9 @@ There is no linter or formatter configured. Settings come only from the environm
   its Cardmarket product id (`cm_product`, also the row of its Cardmarket price). **Games**: `Game` (mtg, pokemon,
   lorcana, onepiece, yugioh, riftbound); `Expansion`, `Category` and `Card` belong to a game, uniqueness is per game,
   and every catalog lookup (recognition, reconcile, resolve_blueprints, API) stays inside one game. Collection, import,
-  export, listings, publish, catalog and scan setup take `?game=<slug>` through `game_param(params)` / `GAME` in
-  `ledger/api/common.py` (default `mtg`, unknown slug 400); `GET /api/scan/sessions/` and `me`'s `pending_changes`
-  without `game` cover every game; item and listing detail (`collection/<pk>/`, `listings/<pk>/`) return their `game`;
+  export, listings, catalog and scan setup take `?game=<slug>` through `game_param(params)` / `GAME` in
+  `ledger/api/common.py` (default `mtg`, unknown slug 400); `GET /api/scan/sessions/`, `POST /api/listings/publish/` and `me`'s
+  `pending_changes` without `game` (absent or blank) cover every game; item and listing detail (`collection/<pk>/`, `listings/<pk>/`) return their `game`;
   `GET /api/games/` lists the games. Orders, shipments, sync and `orders_to_ship` stay global. The catalog is rebuilt
   only by the nightly `ledger/catalog_sync.py`, with no
   CardTrader token: it imports the files of the separate generator repo gab-25/cardledger_database from a private

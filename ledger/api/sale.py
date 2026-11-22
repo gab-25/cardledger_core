@@ -112,11 +112,14 @@ def listing(request, item_pk):
     })
 
 
-@doc(TAGS, "Publish the listings of a game waiting to be published to CardTrader", parameters=[GAME])
+@doc(TAGS, "Publish the listings waiting to be published to CardTrader (one game, or every game)",
+     parameters=[query("game", "Slug of the game; empty: every game")])
 @api_view(["POST"])
 def publish(request):
+    params = request.query_params
+    game = game_param(params) if params.get("game", "").strip() else None
     try:
-        result = services.publish_pending(request.user, game_param(request.query_params))
+        result = services.publish_pending(request.user, game)
     except CardTraderError as exc:
         raise ServiceError(f"Publish failed: {exc}")
     n = result.published
