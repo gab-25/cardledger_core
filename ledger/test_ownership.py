@@ -13,7 +13,7 @@ from django.urls import reverse
 from .models import (
     Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, SyncConflict, SyncLog, SyncService,
 )
-from .tests import LedgerTestCase
+from .tests import LedgerTestCase, game
 
 AUTH = ("auth", "0012_alter_user_first_name_max_length")
 BEFORE = [("ledger", "0013_scanline_read_name"), AUTH]
@@ -94,7 +94,7 @@ class OwnedByTest(TestCase):
         self.rows = {user: self.make_rows(user, n) for n, user in enumerate((self.a, self.b), start=1)}
 
     def make_rows(self, user, n):
-        card = Card.objects.create(name=f"Card {n}", set_code="DMR")
+        card = Card.objects.create(game=game(), name=f"Card {n}", set_code="DMR")
         item = CollectionItem.objects.create(card=card, owner=user)
         listing = Listing.objects.create(item=item, price=Decimal("1.00"))
         order = Order.objects.create(ct_id=n, code=f"c{n}", owner=user)

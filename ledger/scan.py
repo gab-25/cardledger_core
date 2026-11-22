@@ -168,7 +168,7 @@ def save_session(session):
         if session.lines.filter(needs_confirmation=True).exists():
             raise ScanError("Some cards still need confirmation.")
         saved = 0
-        for line in session.lines.select_related("blueprint__expansion"):
+        for line in session.lines.select_related("blueprint__expansion__game"):  # cards go to the printing's game
             card = _card_for(line)
             item, created = CollectionItem.objects.get_or_create(
                 owner=session.owner, card=card, condition=line.condition, language=line.language, foil=line.foil,

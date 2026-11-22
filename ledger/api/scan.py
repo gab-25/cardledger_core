@@ -40,25 +40,25 @@ def _openrouter_configured():
 
 def _missing_services(user):
     """What is missing before scanning: [(message, profile link or "")]. The catalog needs no token, only its sync."""
-    if not Expansion.objects.exists():
+    if not Expansion.objects.filter(game=recognition.scan_game()).exists():
         return [("The card catalog is empty: it is loaded by the nightly catalog sync.", "")]
     return []
 
 
 def _search_expansion(code, session, warnings):
-    """The expansion to search in: set=<code>, else the session's, else None (the whole catalog)."""
+    """The expansion to search in: set=<code>, else the session's, else None (the whole catalog of the game)."""
     code = code.strip().lower()
     if code == "all":
         return None
     if code:
-        expansion = catalog.expansion_by_code(code)
+        expansion = catalog.expansion_by_code(code, recognition.scan_game())
         if expansion is not None:
             return expansion
     return session.expansion
 
 
 def _search(expansion, q):
-    qs = Blueprint.objects.select_related("expansion")
+    qs = Blueprint.objects.select_related("expansion").filter(expansion__game=recognition.scan_game())
     if expansion is not None:
         qs = qs.filter(expansion=expansion)
     q = q.strip()
@@ -105,7 +105,7 @@ def setup(request):
     warnings = []
     last = ScanSession.objects.owned_by(request.user).order_by("-created_at", "-id").first()
     return Response(s.SetupSerializer({
-        "expansions": Expansion.objects.all(),
+        "expansions": Expansion.objects.filter(game=recognition.scan_game()),
         "conditions": _choices(Condition.choices),
         "languages": _choices(Language.choices),
         "defaults": {

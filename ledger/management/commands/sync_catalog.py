@@ -5,7 +5,8 @@ from ledger import tasks
 
 class Command(BaseCommand):
     help = (
-        "Queue the full catalog sync (Cardmarket products and prices, Scryfall card data) on the Celery worker."
+        "Queue the catalog sync (the generator's catalog files and Cardmarket's prices of every game) "
+        "on the Celery worker."
     )
 
     def handle(self, *args, **options):

@@ -25,10 +25,12 @@ from .openrouter import OpenRouterClient
 from .catalog import blueprint_of, clashing_owners, merge_cards, normalize_number
 from .forms import get_or_create_card
 from .models import (
+    MAGIC,
     Blueprint,
     Card,
     CollectionItem,
     Condition,
+    Game,
     Language,
     Listing,
     Order,
@@ -167,19 +169,23 @@ def _choice(value, choices, default, field_name, line):
 
 
 def link_blueprint(card):
-    """Tie a card to its catalog printing by set + collector number, when it has none and one matches."""
+    """Tie a card to its catalog printing by set + collector number, when it has none and one matches in its game."""
     if card.cm_product_id or not card.collector_number:
         return
     bp = Blueprint.objects.filter(
-        expansion__code=card.set_code.lower(), collector_number=normalize_number(card.collector_number)
+        expansion__game_id=card.game_id, expansion__code=card.set_code.lower(),
+        collector_number=normalize_number(card.collector_number),
     ).order_by("cm_product_id").first()
-    if bp is not None and not Card.objects.filter(cm_product_id=bp.cm_product_id).exists():
+    if bp is not None and not Card.objects.filter(game_id=card.game_id, cm_product_id=bp.cm_product_id).exists():
         card.cm_product_id = bp.cm_product_id
         card.save(update_fields=["cm_product_id"])
 
 
-def import_csv(uploaded_file, owner):
-    """Create or update owner's collection items from a CSV. Returns (created, updated)."""
+def import_csv(uploaded_file, owner, game=None):
+    """Create or update owner's collection items from a CSV, as cards of game (None: Magic). Returns (created,
+    updated)."""
+    if game is None:
+        game = Game.by_slug(MAGIC)
     try:
         text = uploaded_file.read().decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -205,6 +211,7 @@ def import_csv(uploaded_file, owner):
                 raise CsvImportError(f"Line {line}: quantity must be positive")
 
             card = get_or_create_card(
+                game,
                 row["name"],
                 row["set"].upper(),
                 normalize_number(row.get("number", "")),
@@ -327,7 +334,8 @@ def _link_ct_blueprint(card, bp):
     number = normalize_number(card.collector_number) or _ct_number(bp)
     existing = (
         Card.objects.exclude(pk=card.pk)
-        .filter(Q(ct_blueprint_id=bp["id"]) | Q(set_code=card.set_code, collector_number=number) & ~Q(collector_number=""))
+        .filter(Q(ct_blueprint_id=bp["id"])
+                | Q(game_id=card.game_id, set_code=card.set_code, collector_number=number) & ~Q(collector_number=""))
         .first()
     )
     other_printing = existing is not None and (

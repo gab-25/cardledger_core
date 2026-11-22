@@ -37,6 +37,12 @@ services:
       POSTGRES_PORT: 5432
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-compose-key}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
+      # Catalog files on S3: forwarded only when set.
+      CARDLEDGER_CATALOG_BUCKET:
+      CARDLEDGER_CATALOG_ENDPOINT:
+      CARDLEDGER_CATALOG_REGION:
+      CARDLEDGER_CATALOG_ACCESS_KEY_ID:
+      CARDLEDGER_CATALOG_SECRET_ACCESS_KEY:
       CELERY_BROKER_URL: redis://redis:6379/0
     depends_on:
       db:

@@ -6,14 +6,16 @@ from . import catalog
 from .models import Blueprint, Card, CollectionItem, Condition, Language, Listing
 
 
-def get_or_create_card(name, set_code, collector_number="", **defaults):
-    """The printing (set + collector number) when the number is known, else the legacy name + set row."""
+def get_or_create_card(game, name, set_code, collector_number="", **defaults):
+    """The game's printing (set + collector number) when the number is known, else the legacy name + set row."""
     if collector_number:
         card, _ = Card.objects.get_or_create(
-            set_code=set_code, collector_number=collector_number, defaults={"name": name, **defaults}
+            game=game, set_code=set_code, collector_number=collector_number, defaults={"name": name, **defaults}
         )
     else:
-        card, _ = Card.objects.get_or_create(name=name, set_code=set_code, collector_number="", defaults=defaults)
+        card, _ = Card.objects.get_or_create(
+            game=game, name=name, set_code=set_code, collector_number="", defaults=defaults
+        )
     return card
 
 

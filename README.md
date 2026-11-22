@@ -74,7 +74,10 @@ docker run -p 8000:8000 \
 Environment variables: the `POSTGRES_*` ones above, `DJANGO_SECRET_KEY`, `DJANGO_DEBUG` (default `false` in the image),
 `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` (comma-separated), `DJANGO_BEHIND_HTTPS_PROXY` (`true` when a
 reverse proxy terminates HTTPS and sets `X-Forwarded-Proto`), `GUNICORN_WORKERS`,
-`OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `CELERY_BROKER_URL` (default `redis://localhost:6379/0`).
+`OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `CELERY_BROKER_URL` (default `redis://localhost:6379/0`), and for the catalog
+files `CARDLEDGER_CATALOG_BUCKET`, `CARDLEDGER_CATALOG_ENDPOINT` (only for S3-compatible storage, empty = AWS),
+`CARDLEDGER_CATALOG_REGION` (empty = `us-east-1`, `auto` for Cloudflare R2), `CARDLEDGER_CATALOG_ACCESS_KEY_ID` and
+`CARDLEDGER_CATALOG_SECRET_ACCESS_KEY` (the `AWS_*` variables are never read); see below.
 The app container applies pending migrations (`python manage.py migrate`) every time it starts, before gunicorn; the
 Celery worker does not. If a migration fails the container exits without serving, and its logs show why.
 
@@ -94,9 +97,8 @@ the old image, or with a one-off container of the new one, e.g.
 
 Every user connects their own CardTrader token from **Profile and settings → Connected services** (the token is checked
 with CardTrader before it is saved; only its owner can show or copy it there); it is used only for that user's listings, orders and
-shipments, and a CardTrader account can be connected to one user only. The administrator's token (the first superuser
-with one) also loads the shared card catalog and prices and recognises everyone's scanned cards, so it must be connected
-for scanning to work. `CARDTRADER_API_TOKEN` is no longer read (nor passed by `compose.yaml`): on upgrade, if it is
+shipments, and a CardTrader account can be connected to one user only. Nothing else uses a CardTrader token: the card
+catalog, prices and scanning need none. `CARDTRADER_API_TOKEN` is no longer read (nor passed by `compose.yaml`): on upgrade, if it is
 still set where `migrate` runs and no token was saved in the profile, the migration copies it into the first
 superuser's profile; otherwise connect the token from the profile after upgrading.
 
@@ -115,11 +117,20 @@ PL→Heavily Played, PO→Poor.
 
 ## Card database and Cardmarket prices
 
-Every night the Ledger reloads its card database from CardTrader (every MTG expansion and every printing, i.e.
-blueprint) and Cardmarket's public price guide (low, trend, average and the 1/7/30-day averages, regular and foil).
-Each CardTrader blueprint carries its Cardmarket product id, which ties it to its price. Your cards are matched to a
-printing by their CardTrader blueprint, or else by set code + collector number; the sync logs how many cards have no
-printing. It uses the administrator's CardTrader token (Profile and settings).
+The Ledger holds the catalog of six games: Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound (`Game`).
+Expansions, categories and cards belong to a game and every lookup stays inside one game. The catalog API takes
+`?game=<slug>` (`mtg` by default); users still see only Magic until the UI lets them choose the game.
+
+Every night the Ledger rebuilds the catalog from the files of the generator
+[cardledger_database](https://github.com/gab-25/cardledger_database), kept in a private S3 bucket
+(one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest). The generator is
+run by hand (`cardledger-db generate`, then `cardledger-db upload`). Every night the Ledger downloads each game's file
+and imports it only when the sha256 of its bytes differs from the one it last imported. The nightly sync also downloads
+Cardmarket's public price guide of each game (low, trend, average and the
+1/7/30-day averages, regular and foil or holo) and matches your cards to the catalog printings, game by game; it logs
+how many cards have no printing. Scryfall and Cardmarket's product lists are no longer read by the app, and no token
+is needed. The app only needs read access to the bucket (`s3:GetObject`, plus `s3:ListBucket` so a missing key is
+reported as missing).
 
 - **Cards** page: search the card database by name, set code or collector number (or only the cards you own) and see
   how many copies you own and the Cardmarket prices.
@@ -135,18 +146,34 @@ The sync runs on a Celery worker (Redis broker). `sync_catalog` only queues it; 
 docker compose up -d redis
 uv run celery -A config worker --loglevel=info      # the worker
 uv run python manage.py sync_catalog                # queue a sync (outcome in Sync → Activity log)
-uv run python manage.py sync_catalog --set CODE     # reload one expansion now, without the worker
 ```
 
 With Docker Compose the `worker` and `redis` services start with the stack; queue a sync with
 `docker compose exec cardledger python manage.py sync_catalog`.
+
+When the catalog files cannot be read (bucket not configured, a game without its file in the bucket, a file that cannot
+be downloaded or a corrupt one), the games that already have a catalog keep it as it is but still get the night's Cardmarket prices; their line
+in the Activity log is a warning that tells why the catalog was not updated. A game that fails for any other reason is
+rolled back without stopping the others.
+
+### Deploying this version
+
+- Set the `CARDLEDGER_CATALOG_*` variables (bucket, region, access key and secret, plus the endpoint for
+  S3-compatible storage) on the worker, where the sync runs, and upload the generator's files to the bucket first
+  (`cardledger-db generate` then `cardledger-db upload`; no manifest is needed): without them the catalog is not
+  rebuilt (Magic's prices still are).
+- Restart the app and the worker together: the app applies the migrations when it starts, and an old worker running
+  the sync after them would fail.
+- Rolling back below migration `0028` (or `0032`, which allows set codes up to 40 characters) is clean only before
+  the first multi-game sync, or after deleting the `Expansion`, `Category`, `Blueprint` and `Card` rows of the games
+  other than Magic.
 
 ## Scanning cards with the camera
 
 **Collection → Scan cards** opens a phone-friendly flow: pick an expansion (or *All expansions*) and a default
 condition, then frame one card at a time. **Auto-shoot** takes the photo by itself as soon as a card is in the box
 and in focus, and re-arms only once the box is empty again (the shutter button still works). The photo is
-recognised by a vision model on OpenRouter, matched against the local CardTrader catalog and added to a draft.
+recognised by a vision model on OpenRouter, matched against the local catalog and added to a draft.
 Uncertain cards ask you to pick among candidates; **Review** shows the draft (duplicates merged), lets you set a
 "list for sale above €X" threshold and saves everything at once (listed copies get the CardTrader market price; listings
 are created as *To publish*).
@@ -166,8 +193,8 @@ are created as *To publish*).
 - OpenRouter is configured only on the server, through `OPENROUTER_API_KEY` (it cannot be set from the profile);
   `OPENROUTER_MODEL` picks the vision model (e.g. `qwen/qwen3.8-flash`) and has no default: card recognition
   needs both.
-- The catalog loads lazily from CardTrader and is refreshed by the nightly sync; `uv run python manage.py
-  sync_catalog --set CODE` reloads one expansion right away.
+- The catalog is loaded and refreshed by the nightly sync (`uv run python manage.py sync_catalog`); run it once after
+  the first migrate.
 - The camera works on **smartphones only** (webcams can't focus on a card up close). A session started on a
   computer shows a **QR code** that opens the same session on the phone; Review, confirmation and search work on
   both.
