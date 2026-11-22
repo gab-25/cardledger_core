@@ -16,9 +16,9 @@ from rest_framework.response import Response
 
 from .. import services
 from ..forms import CatalogItemForm, CsvImportForm, ItemForm
-from ..models import MAGIC, Blueprint, Card, Category, CollectionItem, Condition, Language, Listing, SyncLog
+from ..models import Blueprint, Card, Category, CollectionItem, Condition, Language, Listing, SyncLog
 from ..presentation import item_badge
-from .common import PAGE, doc, form_body, form_errors, messages_response, msg, page_payload, query
+from .common import GAME, PAGE, doc, form_body, form_errors, game_param, messages_response, msg, page_payload, query
 
 TAGS = ["collection"]
 VALUE = ExpressionWrapper(F("trend") * F("quantity"), output_field=DecimalField())
@@ -97,16 +97,19 @@ def _row(item):
 
 def _collection(request):
     user = request.user
-    items = _with_blueprint(CollectionItem.objects.owned_by(user).select_related("card", "listing"))
+    params = request.query_params
+    game = game_param(params)
+    items = _with_blueprint(CollectionItem.objects.owned_by(user).filter(card__game=game)
+                            .select_related("card", "listing"))
     stats = items.aggregate(total=Sum("quantity"), value=Sum(VALUE))
-    stats["unique"] = Card.objects.filter(items__owner=user).distinct().count()
+    stats["unique"] = Card.objects.filter(items__owner=user, game=game).distinct().count()
     stats["for_sale"] = (
-        Listing.objects.owned_by(user).exclude(status=Listing.Status.SOLD).aggregate(n=Sum("quantity"))["n"] or 0
+        Listing.objects.owned_by(user).filter(item__card__game=game).exclude(status=Listing.Status.SOLD)
+        .aggregate(n=Sum("quantity"))["n"] or 0
     )
     if stats["value"] is not None:
         stats["value"] = f"{stats['value']:.2f}"
 
-    params = request.query_params
     q = params.get("q", "").strip()
     foil = params.get("foil") == "1"
     set_code = params.get("set", "")
@@ -121,16 +124,17 @@ def _collection(request):
     if cond in Condition.values:
         items = items.filter(condition=cond)
     if category is not None:
-        # a category id is only unique within a game: the collection's categories are Magic's (until it has a game)
-        items = items.filter(category_ct_id=category, card__game__slug=MAGIC)
-    owned_products = Card.objects.filter(items__owner=user, cm_product_id__isnull=False).values("cm_product_id")
-    categories = (Category.objects.filter(game__slug=MAGIC, blueprints__cm_product_id__in=owned_products).distinct()
+        # a category id is only unique within a game, and the items are already the game's
+        items = items.filter(category_ct_id=category)
+    owned_products = (Card.objects.filter(items__owner=user, game=game, cm_product_id__isnull=False)
+                      .values("cm_product_id"))
+    categories = (Category.objects.filter(game=game, blueprints__cm_product_id__in=owned_products).distinct()
                   .order_by("name", "cm_id"))
 
     return Response({
         **page_payload(request, items, _row),
         "stats": stats,
-        "sets": list(Card.objects.filter(items__owner=user).values_list("set_code", flat=True)
+        "sets": list(Card.objects.filter(items__owner=user).filter(game=game).values_list("set_code", flat=True)
                      .distinct().order_by("set_code")),
         "categories": [{"id": c.cm_id, "name": c.name} for c in categories],
         "filtered": bool(q or foil or set_code or cond or category is not None),
@@ -145,6 +149,7 @@ def _collection(request):
     query("set", "Exact set code"),
     query("cond", "Condition", enum=Condition.values),
     query("category", "CardTrader category id of the item's catalog product"),
+    GAME,
     PAGE,
 ])
 @api_view(["GET", "POST"])
@@ -167,7 +172,7 @@ def collection(request):
 @extend_schema(methods=["GET"], operation_id="collection_item_retrieve")
 @api_view(["GET", "PUT", "DELETE"])
 def item(request, pk):
-    obj = get_object_or_404(_with_blueprint(CollectionItem.objects.owned_by(request.user).select_related("card")), pk=pk)
+    obj = get_object_or_404(_with_blueprint(CollectionItem.objects.owned_by(request.user).select_related("card__game")), pk=pk)
     if request.method == "DELETE":
         name = obj.card.name
         obj.delete()
@@ -181,6 +186,7 @@ def item(request, pk):
     card = obj.card
     return Response({
         "id": obj.pk,
+        "game": card.game.slug,
         "name": card.name,
         "set_code": card.set_code,
         "collector_number": card.collector_number,
@@ -196,17 +202,18 @@ def item(request, pk):
     })
 
 
-@doc(TAGS, "CSV import: the columns (GET) or import a file (POST multipart 'file')",
-     request={"multipart/form-data": form_body("CsvImport", CsvImportForm)})
+@doc(TAGS, "CSV import: the columns (GET) or import a file (POST multipart 'file') into the game of ?game",
+     request={"multipart/form-data": form_body("CsvImport", CsvImportForm)}, parameters=[GAME])
 @api_view(["GET", "POST"])
 @parser_classes([MultiPartParser])
 def import_csv(request):
+    game = game_param(request.query_params)
     if request.method == "GET":
         return Response({"columns": list(services.CSV_FIELDS)})
     form = CsvImportForm(data={}, files=request.FILES)
     if form.is_valid():
         try:
-            created, updated = services.import_csv(form.cleaned_data["file"], request.user)
+            created, updated = services.import_csv(form.cleaned_data["file"], request.user, game)
         except services.CsvImportError as exc:
             form.add_error("file", str(exc))
         else:
@@ -214,10 +221,10 @@ def import_csv(request):
     raise form_errors(form)
 
 
-@doc(TAGS, "Download the collection as CSV")
+@doc(TAGS, "Download the collection of the game of ?game as CSV", parameters=[GAME])
 @api_view(["GET"])
 def export_csv(request):
-    items = CollectionItem.objects.owned_by(request.user)
+    items = CollectionItem.objects.owned_by(request.user).filter(card__game=game_param(request.query_params))
     response = HttpResponse(content_type="text/csv; charset=utf-8")
     stamp = timezone.localdate().isoformat()
     response["Content-Disposition"] = f'attachment; filename="cardledger-{stamp}.csv"'
