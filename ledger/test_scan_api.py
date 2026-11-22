@@ -23,7 +23,8 @@ from .cardtrader import CardTraderError
 from .models import Blueprint, CollectionItem, Expansion, ScanCapture, ScanLine, ScanSession, SyncService
 from .openrouter import OpenRouterError
 from .recognition import Recognition
-from .tests import LedgerTestCase, cm_id, load_catalog
+from .tests import LedgerTestCase, cm_id, game, load_catalog
+from .test_game_api import pokemon_setup
 
 IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
 DESKTOP = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
@@ -34,6 +35,7 @@ class FakeRecognizer:
         self.result = Recognition(name="Counterspell", set_code="dmr", collector_number="045", language="IT")
         self.error = None
         self.calls = 0
+        self.games = []
 
     def __enter__(self):
         return self
@@ -41,8 +43,9 @@ class FakeRecognizer:
     def __exit__(self, *exc):
         pass
 
-    def recognize_card(self, image):
+    def recognize_card(self, image, game_slug="mtg"):
         self.calls += 1
+        self.games.append(game_slug)
         if self.error:
             raise self.error
         return self.result
@@ -200,7 +203,7 @@ class SessionListTest(ScanApiBase):
 
     def test_other_users_sessions_are_excluded(self):
         mine = self.start()
-        ScanSession.objects.create(owner=self.other, expansion=self.dmr)
+        ScanSession.objects.create(owner=self.other, game=game(), expansion=self.dmr)
         self.assertEqual([i["uuid"] for i in self.listed()], [str(mine.uuid)])
 
     def test_newest_activity_first(self):
@@ -221,7 +224,7 @@ class SessionListTest(ScanApiBase):
 
     def test_capped(self):
         for _ in range(SESSION_LIST_LIMIT + 2):
-            ScanSession.objects.create(owner=self.user, expansion=self.dmr)
+            ScanSession.objects.create(owner=self.user, game=game(), expansion=self.dmr)
         self.assertEqual(len(self.listed()), SESSION_LIST_LIMIT)
 
 
@@ -257,7 +260,7 @@ class SessionDeleteTest(ScanApiBase):
             self.assertError(self.call("post", "scan_api_save", session.uuid), 404, "not_found")
 
     def test_other_users_session_is_404(self):
-        theirs = ScanSession.objects.create(owner=self.other, expansion=self.dmr)
+        theirs = ScanSession.objects.create(owner=self.other, game=game(), expansion=self.dmr)
         self.assertError(self.call("delete", "scan_api_session", theirs.uuid), 404, "not_found")
         self.assertTrue(ScanSession.objects.filter(pk=theirs.pk).exists())
 
@@ -496,7 +499,7 @@ class PhoneTest(ScanApiBase):
         body = self.call("get", "scan_api_session", session.uuid, HTTP_USER_AGENT=DESKTOP, secure=True).json()
         data = body["session"]
         self.assertFalse(data["is_phone"])
-        self.assertEqual(data["phone_url"], f"https://testserver/scan/{session.uuid}/")
+        self.assertEqual(data["phone_url"], f"https://testserver/mtg/scan/{session.uuid}/")
         self.assertNotIn("phone_qr_svg", data)
         self.assertTrue(data["phone_secure"])
 
@@ -520,7 +523,7 @@ class ReviewTest(ScanApiBase):
         self.assertEqual((body["copies"], body["unique"]), (1, 1))
         self.assertNotIn("listed", body)
         resp = self.call("post", "scan_api_save", session.uuid)
-        self.assertEqual(resp.json(), {"saved": 1, "redirect": "/", "messages": [
+        self.assertEqual(resp.json(), {"saved": 1, "redirect": "/mtg/", "messages": [
             {"level": "success", "text": "Saved 1 cards."}]})
         self.assertTrue(CollectionItem.objects.filter(card__cm_product_id=cm_id(1201)).exists())
 
@@ -585,7 +588,7 @@ class LineTest(ScanApiBase):
 class ProtocolTest(ScanApiBase):
     def test_403_without_login(self):
         self.client.logout()
-        session = ScanSession.objects.create(owner=self.user)
+        session = ScanSession.objects.create(owner=self.user, game=game())
         for resp in (self.call("get", "scan_api_setup"),
                      self.call("post", "scan_api_sessions", data={}),
                      self.call("get", "scan_api_review", session.uuid),
@@ -609,6 +612,103 @@ class ProtocolTest(ScanApiBase):
         self.assertError(resp, 405, "method_not_allowed")
         self.assertEqual(set(resp["Allow"].split(", ")), {"GET", "POST", "OPTIONS"})
         self.assertError(self.call("post", "scan_api_review", session.uuid), 405, "method_not_allowed")
+
+
+class ScanGameTest(ScanApiBase):
+    """A scan session belongs to a game: recognition, search and picks stay inside it."""
+
+    def setUp(self):
+        super().setUp()
+        self.sv1, self.pikachu, _ = pokemon_setup(self)
+
+    def start_in(self, slug, **data):
+        resp = self.call("post", "scan_api_sessions", data={"game": slug, **data})
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return resp.json()["session"], ScanSession.objects.get(uuid=resp.json()["session"]["uuid"])
+
+    def test_start_session_in_game(self):
+        body, session = self.start_in("pokemon")
+        self.assertEqual((body["game"], session.game.slug), ("pokemon", "pokemon"))
+        resp = self.call("post", "scan_api_sessions", data={})
+        self.assertEqual(resp.json()["session"]["game"], "mtg")
+
+    def test_unknown_game_is_invalid(self):
+        self.assertInvalid(self.call("post", "scan_api_sessions", data={"game": "chess"}), "game")
+
+    def test_expansion_must_belong_to_game(self):
+        self.assertInvalid(self.call("post", "scan_api_sessions", data={"game": "pokemon", "expansion_id": self.dmr.pk}),
+                           "expansion_id")
+        self.assertInvalid(self.call("post", "scan_api_sessions", data={"expansion_id": self.sv1.pk}), "expansion_id")
+        body, session = self.start_in("pokemon", expansion_id=self.sv1.pk)
+        self.assertEqual((body["expansion"]["code"], session.expansion), ("sv1", self.sv1))
+
+    def test_setup_per_game(self):
+        body = self.client.get(reverse("ledger:scan_api_setup"), {"game": "pokemon"}).json()
+        self.assertEqual([e["code"] for e in body["expansions"]], ["sv1"])
+        self.assertEqual(body["missing"], [])
+        self.assertNotIn("sv1", [e["code"] for e in self.call("get", "scan_api_setup").json()["expansions"]])
+        self.assertNotEqual(self.client.get(reverse("ledger:scan_api_setup"), {"game": "lorcana"}).json()["missing"], [])
+
+    def test_setup_defaults_follow_the_last_session_of_the_game(self):
+        self.start(condition="EX")
+        self.start_in("pokemon", expansion_id=self.sv1.pk, condition="GD")
+        self.assertEqual(self.call("get", "scan_api_setup").json()["defaults"],
+                         {"expansion_id": self.dmr.pk, "condition": "EX"})
+        self.assertEqual(self.client.get(reverse("ledger:scan_api_setup"), {"game": "pokemon"}).json()["defaults"],
+                         {"expansion_id": self.sv1.pk, "condition": "GD"})
+
+    def test_sessions_list_per_game(self):
+        magic = self.start()
+        _, pokemon = self.start_in("pokemon")
+        listed = self.client.get(reverse("ledger:scan_api_sessions"), {"game": "pokemon"}).json()["results"]
+        self.assertEqual([i["uuid"] for i in listed], [str(pokemon.uuid)])
+        everything = self.call("get", "scan_api_sessions").json()["results"]
+        self.assertEqual({i["uuid"] for i in everything}, {str(magic.uuid), str(pokemon.uuid)})
+
+    def test_capture_matches_in_session_game(self):
+        _, session = self.start_in("pokemon")
+        self.recognizer.result = Recognition(name="Pikachu", set_code="sv1", collector_number="025", language="EN")
+        resp = self.capture(session)
+        self.assertEqual(resp.json()["result"], "added", resp.content)
+        self.assertEqual(ScanLine.objects.get(session=session).blueprint.cm_product_id, 700001)
+        self.assertEqual(self.recognizer.games, ["pokemon"])
+
+    def test_capture_in_magic_session_ignores_other_games(self):
+        _, session = self.start_in("mtg")
+        self.recognizer.result = Recognition(name="Pikachu", set_code="sv1", collector_number="025", language="EN")
+        self.assertEqual(self.capture(session).json()["result"], "confirm")
+        self.assertNotIn(700001, ScanLine.objects.get(session=session).candidates)
+
+    def test_manual_rejects_other_game(self):
+        _, session = self.start_in("pokemon")
+        self.assertInvalid(self.call("post", "scan_api_manual", session.uuid,
+                                     data={"blueprint_id": cm_id(1201), "language": "EN"}), "blueprint_id")
+        resp = self.call("post", "scan_api_manual", session.uuid, data={"blueprint_id": 700001, "language": "EN"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_confirm_stays_in_game(self):
+        _, session = self.start_in("pokemon")
+        self.recognizer.result = Recognition(name="Pikachu", language="EN")
+        line = self.capture(session).json()["line"]
+        self.assertInvalid(self.call("post", "scan_api_confirm", line["uuid"],
+                                     data={"blueprint_id": cm_id(1201), "language": "EN"}), "blueprint_id")
+        resp = self.call("post", "scan_api_confirm", line["uuid"], data={"blueprint_id": 700001, "language": "EN"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(ScanLine.objects.get(session=session).blueprint, self.pikachu)
+
+    def test_search_stays_in_game(self):
+        _, session = self.start_in("pokemon")
+        url = reverse("ledger:scan_api_search", args=[session.uuid])
+        self.assertEqual(self.client.get(url, {"q": "Counterspell", "set": "all"}).json()["results"], [])
+        self.assertEqual(self.client.get(url, {"q": "Counterspell", "set": "dmr"}).json()["where"], None)
+        body = self.client.get(url, {"q": "pika", "set": "sv1"}).json()
+        self.assertEqual(([b["id"] for b in body["results"]], body["where"]), ([700001], "sv1"))
+
+    def test_phone_url_and_redirect_have_game(self):
+        body, session = self.start_in("pokemon")
+        self.assertTrue(body["phone_url"].endswith(f"/pokemon/scan/{session.uuid}/"), body["phone_url"])
+        self.call("post", "scan_api_manual", session.uuid, data={"blueprint_id": 700001, "language": "EN"})
+        self.assertEqual(self.call("post", "scan_api_save", session.uuid).json()["redirect"], "/pokemon/")
 
 
 class SchemaTest(LedgerTestCase):
@@ -649,8 +749,8 @@ class SchemaTest(LedgerTestCase):
         def query(path):
             return {p["name"] for p in schema["paths"][path]["get"].get("parameters", []) if p["in"] == "query"}
 
-        self.assertEqual(query("/api/collection/"), {"q", "foil", "set", "cond", "category", "page"})
-        self.assertEqual(query("/api/listings/"), {"status"})
+        self.assertEqual(query("/api/collection/"), {"q", "foil", "set", "cond", "category", "game", "page"})
+        self.assertEqual(query("/api/listings/"), {"status", "game"})
         self.assertEqual(query("/api/orders/"), {"tab"})
         self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "game", "category", "owned", "page"})
         self.assertEqual(query("/api/catalog/categories/"), {"game"})

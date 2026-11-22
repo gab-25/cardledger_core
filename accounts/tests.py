@@ -33,6 +33,18 @@ class ProfileTest(TestCase):
         self.assertFalse(data["user"]["is_staff"])
         self.assertEqual(data["counts"], {"pending_changes": 0, "orders_to_ship": 0})
 
+    def test_pending_changes_per_game(self):
+        from ledger.models import Listing
+        from ledger.test_game_api import pokemon_setup
+        _, _, item = pokemon_setup(self)
+        Listing.objects.create(item=item, price="1.00", quantity=1, status=Listing.Status.TO_PUBLISH)
+        url = reverse("accounts:api_me")
+        self.assertEqual(self.client.get(url, {"game": "pokemon"}).json()["counts"]["pending_changes"], 1)
+        self.assertEqual(self.client.get(url, {"game": "mtg"}).json()["counts"]["pending_changes"], 0)
+        self.assertEqual(self.client.get(url).json()["counts"]["pending_changes"], 1)
+        self.assertEqual(self.client.get(url, {"game": ""}).json()["counts"]["pending_changes"], 1)
+        self.assertEqual(self.client.get(url, {"game": "chess"}).status_code, 400)
+
     def test_account_reports_cardtrader_not_connected(self):
         data = self.client.get(reverse("accounts:api_account")).json()
         self.assertEqual(data["cardtrader"]["name"], "CardTrader")

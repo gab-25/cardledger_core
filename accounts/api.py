@@ -13,7 +13,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from ledger import services as ledger_services
-from ledger.api.common import doc, form_body, form_errors, messages_response, msg
+from ledger.api.common import GAME, doc, form_body, game_param, form_errors, messages_response, msg
 from ledger.cardtrader import CardTraderError
 from ledger.models import Listing, Order
 
@@ -35,14 +35,17 @@ def _user(user):
     }
 
 
-@doc(TAGS, "The logged-in user and the sidebar counters")
+@doc(TAGS, "The logged-in user and the sidebar counters (?game limits pending_changes to a game)", parameters=[GAME])
 @api_view(["GET"])
 def me(request):
     user = request.user
+    pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
+    if request.query_params.get("game", "").strip():
+        pending = pending.filter(item__card__game=game_param(request.query_params))
     return Response({
         "user": _user(user),
         "counts": {
-            "pending_changes": Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH).count(),
+            "pending_changes": pending.count(),
             "orders_to_ship": Order.objects.owned_by(user).filter(state=Order.State.PAID).count(),
         },
     })

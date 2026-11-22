@@ -13,7 +13,7 @@ from ..cardtrader import CardTraderError
 from ..forms import ListingForm
 from ..models import CollectionItem, Listing
 from ..presentation import listing_badge
-from .common import doc, form_body, form_errors, messages_response, msg, query
+from .common import GAME, doc, form_body, form_errors, game_param, messages_response, msg, query
 from .errors import ServiceError
 
 TAGS = ["sale"]
@@ -40,10 +40,11 @@ def _row(listing):
 
 
 @doc(TAGS, "Listings with the sale stats (?status filters them)",
-     parameters=[query("status", "Only the listings in this status", enum=Listing.Status.values)])
+     parameters=[GAME, query("status", "Only the listings in this status", enum=Listing.Status.values)])
 @api_view(["GET"])
 def listings(request):
-    qs = Listing.objects.owned_by(request.user).select_related("item__card")
+    game = game_param(request.query_params)
+    qs = Listing.objects.owned_by(request.user).filter(item__card__game=game).select_related("item__card")
     active = qs.exclude(status=Listing.Status.SOLD)
     month_start = timezone.localtime().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     stats = {
@@ -98,6 +99,7 @@ def listing(request, item_pk):
         return messages_response(msg("success", f"Listing for {item.card.name} saved."))
 
     return Response({
+        "game": item.card.game.slug,
         "item": {
             "id": item.pk, "name": item.card.name, "set_code": item.card.set_code, "condition": item.condition,
             "language": item.language, "foil": item.foil, "quantity": item.quantity,
@@ -110,11 +112,14 @@ def listing(request, item_pk):
     })
 
 
-@doc(TAGS, "Publish the listings waiting to be published to CardTrader")
+@doc(TAGS, "Publish the listings waiting to be published to CardTrader (one game, or every game)",
+     parameters=[query("game", "Slug of the game; empty: every game")])
 @api_view(["POST"])
 def publish(request):
+    params = request.query_params
+    game = game_param(params) if params.get("game", "").strip() else None
     try:
-        result = services.publish_pending(request.user)
+        result = services.publish_pending(request.user, game)
     except CardTraderError as exc:
         raise ServiceError(f"Publish failed: {exc}")
     n = result.published

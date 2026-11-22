@@ -19,7 +19,8 @@ from ..models import Blueprint, Condition, Expansion, Language, ScanLine, ScanSe
 from ..openrouter import OpenRouterError
 from . import pages
 from . import serializers as s
-from .common import msg
+from .common import GAME, game_param, msg
+from .common import query as query_param
 from .errors import Blocked, Closed, ServiceError, ServiceMissing
 
 SEARCH_LIMIT = 20
@@ -38,27 +39,29 @@ def _openrouter_configured():
     return not missing
 
 
-def _missing_services(user):
-    """What is missing before scanning: [(message, profile link or "")]. The catalog needs no token, only its sync."""
-    if not Expansion.objects.filter(game=recognition.scan_game()).exists():
+def _missing_services(user, game):
+    """What is missing before scanning game: [(message, profile link or "")]. The catalog needs no token, only its
+    sync."""
+    if not Expansion.objects.filter(game=game).exists():
         return [("The card catalog is empty: it is loaded by the nightly catalog sync.", "")]
     return []
 
 
 def _search_expansion(code, session, warnings):
-    """The expansion to search in: set=<code>, else the session's, else None (the whole catalog of the game)."""
+    """The expansion of the session's game to search in: set=<code>, else the session's, else None (the whole
+    catalog of the game)."""
     code = code.strip().lower()
     if code == "all":
         return None
     if code:
-        expansion = catalog.expansion_by_code(code, recognition.scan_game())
+        expansion = catalog.expansion_by_code(code, session.game)
         if expansion is not None:
             return expansion
     return session.expansion
 
 
-def _search(expansion, q):
-    qs = Blueprint.objects.select_related("expansion").filter(expansion__game=recognition.scan_game())
+def _search(expansion, q, game):
+    qs = Blueprint.objects.select_related("expansion").filter(expansion__game=game)
     if expansion is not None:
         qs = qs.filter(expansion=expansion)
     q = q.strip()
@@ -77,7 +80,7 @@ def _validated(serializer_class, data, **kwargs):
 
 def _get_session(user, uid, *, open_only=True):
     """The user's session (another user's answers 404, like a missing one)."""
-    session = get_object_or_404(ScanSession.objects.owned_by(user).select_related("expansion"), uuid=uid)
+    session = get_object_or_404(ScanSession.objects.owned_by(user).select_related("game", "expansion"), uuid=uid)
     if open_only and session.status != ScanSession.Status.OPEN:
         raise Closed()
     return session
@@ -85,7 +88,8 @@ def _get_session(user, uid, *, open_only=True):
 
 def _get_line(user, uid):
     line = get_object_or_404(
-        ScanLine.objects.owned_by(user).select_related("session__expansion", "blueprint__expansion"), uuid=uid,
+        ScanLine.objects.owned_by(user).select_related("session__game", "session__expansion", "blueprint__expansion"),
+        uuid=uid,
     )
     if line.session.status != ScanSession.Status.OPEN:
         raise Closed()
@@ -98,38 +102,43 @@ def _line_result(line, session):
     return Response(s.LineResultSerializer({"line": line, "count": s.copies(session)}).data)
 
 
-@extend_schema(tags=TAGS, responses=s.SetupSerializer,
-               summary="Choices for a new session: expansions, conditions, languages and the last session's defaults")
+@extend_schema(tags=TAGS, responses=s.SetupSerializer, parameters=[GAME],
+               summary="Choices for a new session of a game: expansions, conditions, languages and the defaults of "
+                       "the last session of that game")
 @api_view(["GET"])
 def setup(request):
+    game = game_param(request.query_params)
     warnings = []
-    last = ScanSession.objects.owned_by(request.user).order_by("-created_at", "-id").first()
+    last = ScanSession.objects.owned_by(request.user).filter(game=game).order_by("-created_at", "-id").first()
     return Response(s.SetupSerializer({
-        "expansions": Expansion.objects.filter(game=recognition.scan_game()),
+        "expansions": Expansion.objects.filter(game=game),
         "conditions": _choices(Condition.choices),
         "languages": _choices(Language.choices),
         "defaults": {
             "expansion_id": last.expansion_id if last else None,
             "condition": last.default_condition if last else Condition.NEAR_MINT,
         },
-        "missing": [{"message": message, "url": url} for message, url in _missing_services(request.user)],
+        "missing": [{"message": message, "url": url} for message, url in _missing_services(request.user, game)],
         "warnings": warnings,
     }).data)
 
 
 @extend_schema(methods=["GET"], tags=TAGS, responses=s.SessionListSerializer, operation_id="scan_sessions_list",
-               summary=f"The user's open sessions, most recent activity first (at most {SESSION_LIST_LIMIT})")
+               parameters=[query_param("game", "Slug of the game; absent or empty: the sessions of every game")],
+               summary=f"The user's open sessions of a game, most recent activity first (at most "
+                       f"{SESSION_LIST_LIMIT}); without game, those of every game")
 @extend_schema(methods=["POST"], tags=TAGS, request=s.SessionCreateSerializer,
                responses={201: s.SessionCreatedSerializer},
                summary="Start a session")
 @api_view(["GET", "POST"])
 def sessions(request):
     if request.method == "GET":
-        listed = scan.open_sessions(request.user)[:SESSION_LIST_LIMIT]
+        game = game_param(request.query_params) if request.query_params.get("game", "").strip() else None
+        listed = scan.open_sessions(request.user, game)[:SESSION_LIST_LIMIT]
         return Response(s.SessionListSerializer({"results": listed}, context={"request": request}).data)
     data = _validated(s.SessionCreateSerializer, request.data)
     expansion = data["expansion_id"]
-    session = scan.start_session(request.user, expansion, data["condition"])
+    session = scan.start_session(request.user, data["game"], expansion, data["condition"])
     body = s.SessionCreatedSerializer({"session": session, "warnings": []}, context={"request": request})
     return Response(body.data, status=status.HTTP_201_CREATED)
 
@@ -168,7 +177,7 @@ def captures(request, uid):
     data = _validated(s.CaptureSerializer, request.data)
     if not _openrouter_configured():
         raise ServiceMissing("Card recognition is not available right now — try again later")
-    missing = _missing_services(request.user)
+    missing = _missing_services(request.user, session.game)
     if missing:
         message, link = missing[0]
         raise ServiceMissing(message, link)
@@ -186,11 +195,11 @@ def captures(request, uid):
         image = data["frame"].read()
         try:
             with services.make_openrouter() as model:
-                rec = model.recognize_card(image)
+                rec = model.recognize_card(image, session.game.slug)
             if not rec.name and not rec.collector_number:  # an empty table, a hand, a blurred frame
                 scan.release_capture(capture)
                 return _capture_result("no_card", "No card in the picture — frame a card", session)
-            found = recognition.match(rec, session.expansion)
+            found = recognition.match(rec, session.expansion, session.game)
             done, _ = scan.add_capture(session, rec, found, frame=image, capture=capture)
         except OpenRouterError as exc:
             scan.release_capture(capture)
@@ -215,7 +224,7 @@ def search(request, uid):
     warnings = []
     where = _search_expansion(query["set"], session, warnings)
     return Response(s.SearchResultSerializer({
-        "results": _search(where, query["q"]),
+        "results": _search(where, query["q"], session.game),
         "where": where.code if where is not None else None,
         "warnings": warnings,
     }).data)
@@ -226,7 +235,7 @@ def search(request, uid):
 @api_view(["POST"])
 def manual(request, uid):
     session = _get_session(request.user, uid)
-    data = _validated(s.PickSerializer, request.data)
+    data = _validated(s.PickSerializer, request.data, context={"game": session.game})
     blueprint, language, foil = data["blueprint_id"], data["language"], data["foil"]
     return _line_result(scan.add_manual(session, blueprint, language, foil), session)
 
@@ -265,7 +274,7 @@ def save(request, uid):
             raise Closed()
         raise Blocked(str(exc))
     return Response(s.SaveResultSerializer({
-        "saved": saved, "redirect": pages.COLLECTION,
+        "saved": saved, "redirect": pages.collection(session.game),
         "messages": [msg("success", f"Saved {saved} cards.")],
     }).data)
 
@@ -299,7 +308,7 @@ def line_confirm(request, uid):
     session = line.session
     if not line.needs_confirmation:
         return _line_result(line, session)
-    data = _validated(s.ConfirmSerializer, request.data)
+    data = _validated(s.ConfirmSerializer, request.data, context={"game": session.game})
     blueprint, language = data["blueprint_id"], data["language"]
     line.foil = data["foil"]
     line.condition = data["condition"] or session.default_condition

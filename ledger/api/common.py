@@ -9,6 +9,8 @@ from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
+from ..models import MAGIC, Game
+
 PAGE_SIZE = 50
 
 
@@ -54,6 +56,17 @@ def query(name, description, enum=None):
     """A query parameter of a list view (a string, optionally one of enum)."""
     return OpenApiParameter(name, OpenApiTypes.STR, OpenApiParameter.QUERY, description=description, enum=enum)
 
+
+def game_param(params):
+    """The game of ?game (a slug, Magic by default); an unknown one is a validation error."""
+    slug = params.get("game", "").strip() or MAGIC
+    try:
+        return Game.by_slug(slug)
+    except Game.DoesNotExist:
+        raise ValidationError({"game": [f"Unknown game '{slug}'."]}) from None
+
+
+GAME = query("game", f"Slug of the game (default {MAGIC}): mtg, pokemon, lorcana, onepiece, yugioh, riftbound")
 
 PAGE = OpenApiParameter("page", OpenApiTypes.INT, OpenApiParameter.QUERY,
                         description="Page number (out of range: the nearest page)")

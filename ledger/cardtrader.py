@@ -11,7 +11,6 @@ from decimal import Decimal
 import httpx
 
 BASE_URL = "https://api.cardtrader.com/api/v2"
-MTG_GAME_ID = 1
 
 # Ledger condition codes (Cardmarket-style grades) -> CardTrader "condition" property.
 CONDITION_TO_CT = {
@@ -25,7 +24,7 @@ CONDITION_TO_CT = {
 }
 CONDITION_FROM_CT = {v: k for k, v in CONDITION_TO_CT.items()}
 
-# Ledger language codes -> CardTrader "mtg_language" property.
+# Ledger language codes -> CardTrader's language property of every game ("mtg_language", "pokemon_language", ...).
 LANGUAGE_TO_CT = {
     "EN": "en", "IT": "it", "DE": "de", "FR": "fr", "ES": "es",
     "PT": "pt", "JP": "jp", "KO": "ko", "RU": "ru", "ZHS": "zh-CN",
@@ -97,11 +96,18 @@ class CardTraderClient:
     def info(self):
         return self._get("/info")
 
+    def games(self):
+        """CardTrader's games: [{"id", "name", "display_name"}, ...] (also accepted wrapped as {"array": [...]})."""
+        data = self._get("/games")
+        if isinstance(data, dict):
+            data = data.get("array") or []
+        return data or []
+
     def expansions(self):
         return self._get("/expansions")
 
-    def categories(self):
-        return self._get("/categories", game_id=MTG_GAME_ID)
+    def categories(self, game_id):
+        return self._get("/categories", game_id=game_id)
 
     def blueprints(self, expansion_id):
         return self._get("/blueprints/export", expansion_id=expansion_id)

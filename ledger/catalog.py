@@ -249,8 +249,16 @@ def _reconcile_game(game, result):
 
 
 def expansion_by_code(code, game):
-    """The expansion of game with this set code (any case), or None."""
+    """The expansion of game with this set code (any case), or None. Some codes are slugs
+    ("agov-age-of-overlord"): failing an exact code, the only one starting with "<code>-"; never a guess."""
     from .models import Expansion
 
     code = (code or "").strip().lower()
-    return Expansion.objects.filter(game=game, code=code).first() if code else None
+    if not code:
+        return None
+    qs = Expansion.objects.filter(game=game)
+    exact = qs.filter(code=code).first()
+    if exact is not None:
+        return exact
+    slugs = list(qs.filter(code__startswith=f"{code}-")[:2])
+    return slugs[0] if len(slugs) == 1 else None

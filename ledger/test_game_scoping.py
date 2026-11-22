@@ -124,9 +124,9 @@ class GameScopingTest(LedgerTestCase):
         self.assertEqual([b.cm_product_id for b in search_blueprints(magic, "mh2 138")], [RAGAVAN])
 
     def test_recognition_searches_only_magic(self):
-        m = match(Recognition(name="Pikachu", language="EN"), None)
+        m = match(Recognition(name="Pikachu", language="EN"), None, self.magic)
         self.assertEqual((m.reason, m.candidates), ("not_found", []))
-        m = match(Recognition(name="Pikachu", set_code="mh2", collector_number="138", language="EN"), None)
+        m = match(Recognition(name="Pikachu", set_code="mh2", collector_number="138", language="EN"), None, self.magic)
         self.assertNotIn(PIKACHU, [b.cm_product_id for b in m.candidates])
         self.assertEqual(catalog.expansion_by_code("mh2", self.pokemon), self.pikachu.expansion)
         self.assertEqual(catalog.expansion_by_code("MH2", self.magic).game, self.magic)

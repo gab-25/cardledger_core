@@ -99,7 +99,7 @@ class OwnedByTest(TestCase):
         listing = Listing.objects.create(item=item, price=Decimal("1.00"))
         order = Order.objects.create(ct_id=n, code=f"c{n}", owner=user)
         order_item = OrderItem.objects.create(order=order, ct_id=n, name="x")
-        session = ScanSession.objects.create(owner=user)
+        session = ScanSession.objects.create(owner=user, game=game())
         line = ScanLine.objects.create(session=session, condition="NM")
         service = SyncService.objects.create(name="CardTrader", user=user)
         conflict = SyncConflict.objects.create(service=service, item=item, local_value="1", remote_value="2")
@@ -142,7 +142,7 @@ class OwnerIsolationSweepTest(LedgerTestCase):
         self.listing = Listing.objects.owned_by(self.user).first()
         self.order = Order.objects.owned_by(self.user).filter(state=Order.State.PAID).first()
         self.conflict = SyncConflict.objects.owned_by(self.user).first()
-        self.session = ScanSession.objects.create(owner=self.user)
+        self.session = ScanSession.objects.create(owner=self.user, game=game())
         self.line = ScanLine.objects.create(session=self.session, condition="NM", frame=b"jpeg")
         self.client.force_login(self.other)
 

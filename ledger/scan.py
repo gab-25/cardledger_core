@@ -11,19 +11,21 @@ class ScanError(Exception):
     pass
 
 
-def start_session(owner, expansion, condition):
-    """New session for owner."""
-    return ScanSession.objects.create(owner=owner, expansion=expansion, default_condition=condition)
+def start_session(owner, game, expansion, condition):
+    """New session for owner, scanning cards of game (expansion: one of game's, or None for all)."""
+    return ScanSession.objects.create(owner=owner, game=game, expansion=expansion, default_condition=condition)
 
 
-def open_sessions(owner):
-    """owner's open sessions, most recent activity first, annotated with last_activity.
+def open_sessions(owner, game=None):
+    """owner's open sessions (of game, or of every game), most recent activity first, annotated with last_activity.
 
     Adding or changing a card touches only its line, so the activity is the latest of the session's and its lines'.
     """
-    return (ScanSession.objects.owned_by(owner).filter(status=ScanSession.Status.OPEN)
-            .annotate(last_activity=Greatest("updated_at", Max("lines__updated_at")))
-            .select_related("expansion").order_by("-last_activity", "-id"))
+    qs = ScanSession.objects.owned_by(owner).filter(status=ScanSession.Status.OPEN)
+    if game is not None:
+        qs = qs.filter(game=game)
+    return (qs.annotate(last_activity=Greatest("updated_at", Max("lines__updated_at")))
+            .select_related("game", "expansion").order_by("-last_activity", "-id"))
 
 
 def _twin(line):

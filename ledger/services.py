@@ -2,6 +2,7 @@
 
 import csv
 import io
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
@@ -16,11 +17,11 @@ from .cardtrader import (
     CONDITION_FROM_CT,
     CONDITION_TO_CT,
     LANGUAGE_TO_CT,
-    MTG_GAME_ID,
     CardTraderClient,
     CardTraderError,
     money,
 )
+from .ct_properties import foil_key, language_key, read_foil, read_language
 from .openrouter import OpenRouterClient
 from .catalog import blueprint_of, clashing_owners, merge_cards, normalize_number
 from .forms import get_or_create_card
@@ -257,15 +258,49 @@ class Resolution:
 
     unmatched: list = field(default_factory=list)
     properties: dict = field(default_factory=dict)  # CardTrader blueprint id -> property names, or None
+    not_sold: set = field(default_factory=set)  # pks of the unmatched cards whose game CardTrader does not sell
 
 
-def _ct_expansion(card, by_code, by_name):
-    """The CardTrader expansion id of a card: by its set code, else by its catalog expansion's name."""
-    found = by_code.get(card.set_code.lower())
+# Names CardTrader may give a game (GET /games), by slug, besides Game.name; compared normalised (_game_name).
+CT_GAME_ALIASES = {
+    MAGIC: ["magic", "magic: the gathering"],
+    "pokemon": ["pokémon", "pokemon"],
+    "lorcana": ["disney lorcana", "lorcana"],
+    "onepiece": ["one piece", "one piece card game"],
+    "yugioh": ["yu-gi-oh!", "yugioh"],
+    "riftbound": ["riftbound", "riftbound: league of legends trading card game"],
+}
+
+
+def _game_name(name):
+    """A game name for comparison: casefolded, without accents, punctuation or spaces."""
+    text = unicodedata.normalize("NFKD", (name or "").casefold())
+    return "".join(c for c in text if c.isalnum())
+
+
+def ct_game_id(client, game):
+    """CardTrader's id of game: the stored one, else looked up once in CardTrader's games and stored. None if absent."""
+    if game.ct_game_id:
+        return game.ct_game_id
+    names = {_game_name(n) for n in [game.name, *CT_GAME_ALIASES.get(game.slug, [])]}
+    for entry in client.games():
+        if entry.get("id") is None:
+            continue
+        if names & {_game_name(entry.get("name")), _game_name(entry.get("display_name"))} - {""}:
+            game.ct_game_id = entry["id"]
+            game.save(update_fields=["ct_game_id"])
+            return game.ct_game_id
+    return None
+
+
+def _ct_expansion(card, game_id, by_code, by_name):
+    """The CardTrader expansion id of a card of CardTrader's game game_id: by its set code, else by its catalog
+    expansion's name."""
+    found = by_code.get((game_id, card.set_code.lower()))
     if found is None:
         bp = blueprint_of(card)
         if bp is not None:
-            found = by_name.get(bp.expansion.name.casefold())
+            found = by_name.get((game_id, bp.expansion.name.casefold()))
     return found
 
 
@@ -292,29 +327,37 @@ def _ct_match(card, exported):
 def resolve_blueprints(client, cards):
     """Fill Card.ct_blueprint_id from the seller's CardTrader catalog, and read what CardTrader takes for products.
 
-    Only the CardTrader expansions of these cards are downloaded; a card whose expansion is not found stays unmatched.
+    Only the CardTrader expansions of these cards, in their own game, are downloaded; a card whose expansion is not
+    found, or whose game CardTrader does not sell, stays unmatched. The blueprints of products and of every game but
+    Magic are read even when already known, for the property names CardTrader takes (language, foil).
     """
     resolution = Resolution()
-    todo = [c for c in cards if not c.ct_blueprint_id or c.is_product]
+    todo = [c for c in cards if not c.ct_blueprint_id or c.is_product or c.game.slug != MAGIC]
     if not todo:
         return resolution
     by_code, by_name = {}, {}
     for e in client.expansions():
-        if e.get("game_id") == MTG_GAME_ID and e.get("code"):
-            by_code.setdefault(e["code"].lower(), e["id"])
-            by_name.setdefault((e.get("name") or "").casefold(), e["id"])
+        if e.get("code"):
+            by_code.setdefault((e.get("game_id"), e["code"].lower()), e["id"])
+            by_name.setdefault((e.get("game_id"), (e.get("name") or "").casefold()), e["id"])
+    game_ids = {}  # Game pk -> CardTrader game id, looked up once per call
     by_expansion = {}
     for card in todo:
-        expansion_id = _ct_expansion(card, by_code, by_name)
+        if card.game_id not in game_ids:
+            game_ids[card.game_id] = ct_game_id(client, card.game)
+        game_id = game_ids[card.game_id]
+        expansion_id = None if game_id is None else _ct_expansion(card, game_id, by_code, by_name)
         if expansion_id is None:
             if not card.ct_blueprint_id:
                 resolution.unmatched.append(card)
+                if game_id is None:
+                    resolution.not_sold.add(card.pk)
             continue
         by_expansion.setdefault(expansion_id, []).append(card)
     for expansion_id, set_cards in by_expansion.items():
         exported = client.blueprints(expansion_id) or []
         for card in set_cards:
-            if card.ct_blueprint_id:  # a product already matched: only what it takes is needed
+            if card.ct_blueprint_id:  # already matched: only what it takes is needed
                 known = next((bp for bp in exported if bp["id"] == card.ct_blueprint_id), None)
                 if known is not None:
                     resolution.properties[known["id"]] = _ct_properties(known)
@@ -371,22 +414,31 @@ def _link_ct_blueprint(card, bp):
 def product_payload(listing, accepted=None):
     """The CardTrader product for a listing; products (sealed, accessories) send only what CardTrader takes for them.
 
-    accepted: the property names CardTrader takes for the blueprint, None when unknown (language only, then).
+    accepted: the property names CardTrader takes for the blueprint, None when unknown. Magic sends what it always
+    has (singles: condition, mtg_language, mtg_foil if foil; products: mtg_language unless refused, condition if
+    taken); other games send the language and foil properties their blueprint names (see ct_properties). A listing
+    of another game that these can't describe is refused by undescribed_reason() before getting here.
     """
     item = listing.item
+    game = item.card.game
+    if game.slug == MAGIC:
+        language, foil = "mtg_language", "mtg_foil"
+        if item.card.is_product and accepted is not None and language not in accepted:
+            language = None
+    else:
+        language, foil = language_key(accepted, game), foil_key(accepted, game)
     if item.card.is_product:
         properties = {}
-        if accepted is None or "mtg_language" in accepted:
-            properties["mtg_language"] = LANGUAGE_TO_CT[item.language]
+        if language:
+            properties[language] = LANGUAGE_TO_CT[item.language]
         if accepted is not None and "condition" in accepted:
             properties["condition"] = CONDITION_TO_CT[item.condition]
     else:
-        properties = {
-            "condition": CONDITION_TO_CT[item.condition],
-            "mtg_language": LANGUAGE_TO_CT[item.language],
-        }
-        if item.foil:
-            properties["mtg_foil"] = True
+        properties = {"condition": CONDITION_TO_CT[item.condition]}
+        if language:
+            properties[language] = LANGUAGE_TO_CT[item.language]
+        if item.foil and foil:
+            properties[foil] = True
     payload = {
         "price": float(listing.price),
         "quantity": listing.quantity,
@@ -399,6 +451,27 @@ def product_payload(listing, accepted=None):
     else:
         payload["blueprint_id"] = item.card.ct_blueprint_id
     return payload
+
+
+PROPERTIES_UNKNOWN = "CardTrader properties unknown"
+FOIL_NOT_OFFERED = "foil not offered on CardTrader for this blueprint"
+
+
+def undescribed_reason(listing, accepted):
+    """Why a listing of a game other than Magic can't be put on CardTrader as it is, or None.
+
+    Its language (a single's, or any when CardTrader's properties are unknown) and its foil must have a property,
+    or CardTrader would sell it with its defaults (English, not foil).
+    """
+    item = listing.item
+    game = item.card.game
+    if game.slug == MAGIC:
+        return None
+    if accepted is None or not item.card.is_product and language_key(accepted, game) is None:
+        return PROPERTIES_UNKNOWN
+    if item.foil and foil_key(accepted, game) is None:
+        return FOIL_NOT_OFFERED
+    return None
 
 
 def _job_error(result):
@@ -414,12 +487,13 @@ class PublishResult:
     failed: list = field(default_factory=list)  # [(listing, reason)]
 
 
-def publish_pending(user):
-    """Push every listing of the user waiting to be published to their CardTrader account."""
+def publish_pending(user, game=None):
+    """Push the listings of the user waiting to be published (of one game, or of all) to their CardTrader account."""
     service = get_cardtrader(user)
-    listings = list(
-        Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH).select_related("item__card")
-    )
+    pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
+    if game is not None:
+        pending = pending.filter(item__card__game=game)
+    listings = list(pending.select_related("item__card__game"))
     result = PublishResult()
     if not listings:
         return result
@@ -429,22 +503,29 @@ def publish_pending(user):
         unmatched = {c.pk for c in resolution.unmatched}
         # Resolution may merge duplicate printings: reload so listings point at the surviving cards.
         listings = list(
-            Listing.objects.filter(pk__in=[l.pk for l in listings]).select_related("item__card")
+            Listing.objects.filter(pk__in=[l.pk for l in listings]).select_related("item__card__game")
         )
+        accepted = {l.pk: resolution.properties.get(l.item.card.ct_blueprint_id) for l in listings}
         to_create, to_update = [], []
         for listing in listings:
-            if listing.ct_product_id:
+            reason = None
+            if not listing.ct_product_id:  # a new product needs its blueprint
+                if listing.item.card_id in resolution.not_sold:
+                    reason = "game not sold on CardTrader"
+                elif listing.item.card_id in unmatched or not listing.item.card.ct_blueprint_id:
+                    reason = "card not found in the CardTrader catalog"
+            reason = reason or undescribed_reason(listing, accepted[listing.pk])
+            if reason:
+                result.failed.append((listing, reason))
+            elif listing.ct_product_id:
                 to_update.append(listing)
-            elif listing.item.card_id in unmatched or not listing.item.card.ct_blueprint_id:
-                result.failed.append((listing, "card not found in the CardTrader catalog"))
             else:
                 to_create.append(listing)
 
         for batch, call in ((to_create, client.bulk_create), (to_update, client.bulk_update)):
             if not batch:
                 continue
-            outcomes = call([product_payload(l, resolution.properties.get(l.item.card.ct_blueprint_id))
-                             for l in batch])
+            outcomes = call([product_payload(l, accepted[l.pk]) for l in batch])
             for listing, outcome in zip(batch, outcomes):
                 if outcome.get("result") in ("ok", "warning") and outcome.get("product_id"):
                     listing.ct_product_id = outcome["product_id"]
@@ -564,8 +645,8 @@ def upsert_order(data, owner):
                 "quantity": raw.get("quantity") or 1,
                 "price": money(raw.get("seller_price")),
                 "condition": CONDITION_FROM_CT.get(props.get("condition"), props.get("condition") or ""),
-                "language": (props.get("mtg_language") or "").upper(),
-                "foil": bool(props.get("mtg_foil")),
+                "language": read_language(props),
+                "foil": read_foil(props),
             },
         )
     if not order.stock_applied and _decrements_stock(order):

@@ -442,6 +442,7 @@ class ScanSession(models.Model):
 
     owner = _owner("scan_sessions")
     uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="scan_sessions")
     expansion = models.ForeignKey(Expansion, null=True, blank=True, on_delete=models.SET_NULL)
     default_condition = models.CharField(max_length=2, choices=Condition.choices, default=Condition.NEAR_MINT)
     status = models.CharField(max_length=5, choices=Status.choices, default=Status.OPEN)

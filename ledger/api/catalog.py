@@ -3,14 +3,13 @@ prices and owned copies."""
 
 from django.db.models import F, Max
 from rest_framework.decorators import api_view
-from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from .. import cardmarket
 from ..catalog import normalize_number
-from ..models import MAGIC, Blueprint, CardmarketPrice, Category, Game
+from ..models import Blueprint, CardmarketPrice, Category
 from ..search import search_blueprints
-from .common import PAGE, doc, page_payload, query
+from .common import GAME, PAGE, doc, game_param, page_payload, query
 
 TAGS = ["catalog"]
 PRICE_FIELDS = ("trend", "low", "avg", "trend_foil", "low_foil", "avg_foil")
@@ -18,18 +17,6 @@ PRICE_FIELDS = ("trend", "low", "avg", "trend_foil", "low_foil", "avg_foil")
 
 def _money(value):
     return None if value is None else f"{value:.2f}"
-
-
-def _game(params):
-    """The game of ?game (a slug, Magic by default); an unknown one is a validation error."""
-    slug = params.get("game", "").strip() or MAGIC
-    try:
-        return Game.by_slug(slug)
-    except Game.DoesNotExist:
-        raise ValidationError({"game": [f"Unknown game '{slug}'."]}) from None
-
-
-GAME = query("game", f"Slug of the game (default {MAGIC}): mtg, pokemon, lorcana, onepiece, yugioh, riftbound")
 
 
 def _category(value):
@@ -55,7 +42,7 @@ def _category(value):
 @api_view(["GET"])
 def catalog(request):
     params = request.query_params
-    game = _game(params)
+    game = game_param(params)
     q = params.get("q", "").strip()
     set_code = params.get("set", "").strip().lower()
     number = normalize_number(params.get("number", ""))
@@ -117,6 +104,6 @@ def catalog(request):
      parameters=[GAME])
 @api_view(["GET"])
 def categories(request):
-    game = _game(request.query_params)
+    game = game_param(request.query_params)
     rows = Category.objects.filter(game=game, blueprints__isnull=False).distinct().order_by("name", "cm_id")
     return Response([{"id": c.cm_id, "name": c.name} for c in rows])
