@@ -4,8 +4,8 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 
 from . import services
-from .models import Blueprint, Card, Category, CollectionItem, Expansion, Listing
-from .tests import LedgerTestCase, game, load_catalog
+from .models import Blueprint, Card, Category, CollectionItem, Expansion, Game, Listing, OrderItem, SyncLog
+from .tests import LedgerTestCase, game, load_catalog, order_payload
 
 
 def pokemon_setup(test):
@@ -102,3 +102,77 @@ class SaleGameTest(LedgerTestCase):
     def test_listing_detail_has_game(self):
         resp = self.client.get(reverse("ledger:api_listing", args=[self.item.pk]))
         self.assertEqual(resp.json()["game"], "pokemon")
+
+
+class PublishGameTest(LedgerTestCase):
+    """Publishing listings and importing orders of a game other than Magic on CardTrader."""
+
+    def setUp(self):
+        super().setUp()
+        load_catalog()
+        self.expansion, self.blueprint, self.item = pokemon_setup(self)
+        self.item.foil = True
+        self.item.save(update_fields=["foil"])
+        self.listing = Listing.objects.create(item=self.item, price="3.00", quantity=1,
+                                              status=Listing.Status.TO_PUBLISH)
+
+    def publish_game(self, slug):
+        resp = self.client.post(reverse("ledger:api_publish") + f"?game={slug}")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_publish_pokemon(self):
+        self.publish_game("pokemon")
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, Listing.Status.PUBLISHED)
+        product = self.ct.products[self.listing.ct_product_id]
+        self.assertEqual(product["blueprint_id"], 2001)
+        self.assertEqual(product["properties_hash"],
+                         {"condition": "Near Mint", "pokemon_language": "en", "pokemon_reverse": True})
+
+    def test_ct_game_id_is_looked_up_once(self):
+        Game.objects.filter(slug="pokemon").update(ct_game_id=None)
+        self.publish_game("pokemon")
+        self.assertIn(("GET", "/games"), self.ct.calls)
+        self.assertEqual(Game.by_slug("pokemon").ct_game_id, 5)
+        Listing.objects.filter(pk=self.listing.pk).update(status=Listing.Status.TO_PUBLISH)
+        self.ct.calls.clear()
+        self.publish_game("pokemon")
+        self.assertNotIn(("GET", "/games"), self.ct.calls)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, Listing.Status.PUBLISHED)
+
+    def test_game_without_ct_game_id_fails_cleanly(self):
+        card = Card.objects.create(game=game("lorcana"), name="Mickey Mouse", set_code="TFC", collector_number="1")
+        item = CollectionItem.objects.create(owner=self.user, card=card, condition="NM", language="EN", quantity=1)
+        listing = Listing.objects.create(item=item, price="2.00", quantity=1, status=Listing.Status.TO_PUBLISH)
+        data = self.publish_game("lorcana")
+        self.assertIn("warning", [m["level"] for m in data["messages"]])
+        self.assertIn("game not sold on CardTrader", " ".join(m["text"] for m in data["messages"]))
+        listing.refresh_from_db()
+        self.assertEqual(listing.status, Listing.Status.TO_PUBLISH)
+        self.assertIsNone(game("lorcana").ct_game_id)
+        self.assertTrue(SyncLog.objects.filter(owner=self.user, message__contains="Mickey Mouse not published").exists())
+
+    def test_same_code_other_game_is_ignored(self):
+        # A Magic expansion with the Pokémon set's code, holding a card with the same Cardmarket id and number.
+        self.ct.expansions.append({"id": 98, "game_id": 1, "code": "sv1", "name": "Scarlet & Violet"})
+        self.ct.blueprints[98] = [{"id": 9801, "category_id": 1, "editable_properties": [], "name": "Pikachu",
+                                   "fixed_properties": {"collector_number": "025"}, "card_market_ids": [700001]}]
+        self.publish_game("pokemon")
+        self.listing.refresh_from_db()
+        self.assertEqual(self.ct.products[self.listing.ct_product_id]["blueprint_id"], 2001)
+        self.assertNotIn(("/blueprints/export", {"expansion_id": "98"}), self.ct.call_params)
+
+    def test_order_line_of_other_game(self):
+        self.publish_game("pokemon")
+        self.listing.refresh_from_db()
+        order = order_payload(9001, "paid", [(self.listing.ct_product_id, "Pikachu", 1)])
+        order["order_items"][0]["properties"] = {"condition": "Near Mint", "pokemon_language": "it",
+                                                 "pokemon_reverse": True}
+        self.ct.orders = [order]
+        services.import_orders(self.ct.client(), services.get_cardtrader(self.user))
+        line = OrderItem.objects.get(ct_id=90010)
+        self.assertEqual(line.language, "IT")
+        self.assertIs(line.foil, True)
+        self.assertEqual(line.listing, self.listing)

@@ -22,6 +22,11 @@ SINGLE_PROPS = [
     LANGUAGE_PROP,
     {"name": "mtg_foil", "type": "boolean", "default_value": "false", "possible_values": [True, False]},
 ]
+POKEMON_PROPS = [
+    {"name": "condition", "type": "string", "default_value": "Near Mint", "possible_values": ["Near Mint", "Played"]},
+    {"name": "pokemon_language", "type": "string", "default_value": "en", "possible_values": ["en", "it"]},
+    {"name": "pokemon_reverse", "type": "boolean", "default_value": "false", "possible_values": [True, False]},
+]
 
 
 def game(slug=MAGIC):
@@ -85,7 +90,9 @@ class FakeCardTrader:
             {"id": 12, "game_id": 1, "code": "dmr", "name": "Dominaria Remastered"},
             {"id": 13, "game_id": 1, "code": "dmu", "name": "Dominaria United"},
             {"id": 99, "game_id": 5, "code": "mh2", "name": "Not MTG"},
+            {"id": 20, "game_id": 5, "code": "sv1", "name": "Scarlet & Violet"},
         ]
+        self.games = [{"id": 1, "name": "Magic"}, {"id": 5, "name": "Pokemon", "display_name": "Pokémon"}]
         self.blueprints = {
             10: [{"id": 1001, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Ragavan, Nimble Pilferer", "version": None, "fixed_properties": {"collector_number": "138"}},
                  {"id": 1002, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Solitude", "version": None, "fixed_properties": {"collector_number": "32"}},
@@ -103,6 +110,8 @@ class FakeCardTrader:
         for blueprints in self.blueprints.values():
             for bp in blueprints:
                 bp["card_market_ids"] = [cm_id(bp["id"])]
+        self.blueprints[20] = [{"id": 2001, "category_id": 73, "editable_properties": POKEMON_PROPS, "name": "Pikachu",
+                                "fixed_properties": {"collector_number": "025"}, "card_market_ids": [700001]}]
         self.categories = [
             {"id": 1, "game_id": 1, "name": "Magic Single Card"},
             {"id": 4, "game_id": 1, "name": "Booster Boxes"},
@@ -129,6 +138,8 @@ class FakeCardTrader:
 
         if path == "/info":
             return httpx.Response(200, json={"id": 1, "name": "ledger", "user_id": 77})
+        if path == "/games":
+            return httpx.Response(200, json={"array": self.games})
         if path == "/expansions":
             return httpx.Response(200, json=self.expansions)
         if path == "/categories":
