@@ -284,6 +284,8 @@ def ct_game_id(client, game):
         return game.ct_game_id
     names = {_game_name(n) for n in [game.name, *CT_GAME_ALIASES.get(game.slug, [])]}
     for entry in client.games():
+        if entry.get("id") is None:
+            continue
         if names & {_game_name(entry.get("name")), _game_name(entry.get("display_name"))} - {""}:
             game.ct_game_id = entry["id"]
             game.save(update_fields=["ct_game_id"])
@@ -412,12 +414,19 @@ def _link_ct_blueprint(card, bp):
 def product_payload(listing, accepted=None):
     """The CardTrader product for a listing; products (sealed, accessories) send only what CardTrader takes for them.
 
-    accepted: the property names CardTrader takes for the blueprint, None when unknown (then only Magic's language
-    and foil are known: see ct_properties).
+    accepted: the property names CardTrader takes for the blueprint, None when unknown. Magic sends what it always
+    has (singles: condition, mtg_language, mtg_foil if foil; products: mtg_language unless refused, condition if
+    taken); other games send the language and foil properties their blueprint names (see ct_properties). A listing
+    of another game that these can't describe is refused by undescribed_reason() before getting here.
     """
     item = listing.item
     game = item.card.game
-    language = language_key(accepted, game)
+    if game.slug == MAGIC:
+        language, foil = "mtg_language", "mtg_foil"
+        if item.card.is_product and accepted is not None and language not in accepted:
+            language = None
+    else:
+        language, foil = language_key(accepted, game), foil_key(accepted, game)
     if item.card.is_product:
         properties = {}
         if language:
@@ -428,8 +437,7 @@ def product_payload(listing, accepted=None):
         properties = {"condition": CONDITION_TO_CT[item.condition]}
         if language:
             properties[language] = LANGUAGE_TO_CT[item.language]
-        foil = foil_key(accepted, game) if item.foil else None
-        if foil:
+        if item.foil and foil:
             properties[foil] = True
     payload = {
         "price": float(listing.price),
@@ -443,6 +451,27 @@ def product_payload(listing, accepted=None):
     else:
         payload["blueprint_id"] = item.card.ct_blueprint_id
     return payload
+
+
+PROPERTIES_UNKNOWN = "CardTrader properties unknown"
+FOIL_NOT_OFFERED = "foil not offered on CardTrader for this blueprint"
+
+
+def undescribed_reason(listing, accepted):
+    """Why a listing of a game other than Magic can't be put on CardTrader as it is, or None.
+
+    Its language (a single's, or any when CardTrader's properties are unknown) and its foil must have a property,
+    or CardTrader would sell it with its defaults (English, not foil).
+    """
+    item = listing.item
+    game = item.card.game
+    if game.slug == MAGIC:
+        return None
+    if accepted is None or not item.card.is_product and language_key(accepted, game) is None:
+        return PROPERTIES_UNKNOWN
+    if item.foil and foil_key(accepted, game) is None:
+        return FOIL_NOT_OFFERED
+    return None
 
 
 def _job_error(result):
@@ -476,22 +505,27 @@ def publish_pending(user, game=None):
         listings = list(
             Listing.objects.filter(pk__in=[l.pk for l in listings]).select_related("item__card__game")
         )
+        accepted = {l.pk: resolution.properties.get(l.item.card.ct_blueprint_id) for l in listings}
         to_create, to_update = [], []
         for listing in listings:
-            if listing.ct_product_id:
+            reason = None
+            if not listing.ct_product_id:  # a new product needs its blueprint
+                if listing.item.card_id in resolution.not_sold:
+                    reason = "game not sold on CardTrader"
+                elif listing.item.card_id in unmatched or not listing.item.card.ct_blueprint_id:
+                    reason = "card not found in the CardTrader catalog"
+            reason = reason or undescribed_reason(listing, accepted[listing.pk])
+            if reason:
+                result.failed.append((listing, reason))
+            elif listing.ct_product_id:
                 to_update.append(listing)
-            elif listing.item.card_id in resolution.not_sold:
-                result.failed.append((listing, "game not sold on CardTrader"))
-            elif listing.item.card_id in unmatched or not listing.item.card.ct_blueprint_id:
-                result.failed.append((listing, "card not found in the CardTrader catalog"))
             else:
                 to_create.append(listing)
 
         for batch, call in ((to_create, client.bulk_create), (to_update, client.bulk_update)):
             if not batch:
                 continue
-            outcomes = call([product_payload(l, resolution.properties.get(l.item.card.ct_blueprint_id))
-                             for l in batch])
+            outcomes = call([product_payload(l, accepted[l.pk]) for l in batch])
             for listing, outcome in zip(batch, outcomes):
                 if outcome.get("result") in ("ok", "warning") and outcome.get("product_id"):
                     listing.ct_product_id = outcome["product_id"]

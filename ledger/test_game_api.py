@@ -5,7 +5,7 @@ from django.urls import reverse
 
 from . import services
 from .models import Blueprint, Card, Category, CollectionItem, Expansion, Game, Listing, OrderItem, SyncLog
-from .tests import LedgerTestCase, game, load_catalog, order_payload
+from .tests import POKEMON_PROPS, LedgerTestCase, game, load_catalog, order_payload
 
 
 def pokemon_setup(test):
@@ -141,6 +141,8 @@ class PublishGameTest(LedgerTestCase):
         self.assertNotIn(("GET", "/games"), self.ct.calls)
         self.listing.refresh_from_db()
         self.assertEqual(self.listing.status, Listing.Status.PUBLISHED)
+        self.assertEqual(self.ct.products[self.listing.ct_product_id]["properties_hash"],
+                         {"condition": "Near Mint", "pokemon_language": "en", "pokemon_reverse": True})
 
     def test_game_without_ct_game_id_fails_cleanly(self):
         card = Card.objects.create(game=game("lorcana"), name="Mickey Mouse", set_code="TFC", collector_number="1")
@@ -176,3 +178,89 @@ class PublishGameTest(LedgerTestCase):
         self.assertEqual(line.language, "IT")
         self.assertIs(line.foil, True)
         self.assertEqual(line.listing, self.listing)
+
+
+class UndescribedListingTest(LedgerTestCase):
+    """A Pokémon listing whose language or foil CardTrader can't be told is never published; the others are."""
+
+    UNKNOWN = "CardTrader properties unknown"
+    NO_FOIL = "foil not offered on CardTrader for this blueprint"
+
+    def setUp(self):
+        super().setUp()
+        load_catalog()
+        self.expansion, self.blueprint, self.item = pokemon_setup(self)
+        self.listing = Listing.objects.create(item=self.item, price="3.00", quantity=1,
+                                              status=Listing.Status.TO_PUBLISH)
+        # A second Pokémon card, always describable: it must publish whatever happens to Pikachu.
+        self.ct.blueprints[20].append({"id": 2002, "category_id": 73, "editable_properties": POKEMON_PROPS,
+                                       "name": "Charmander", "fixed_properties": {"collector_number": "004"},
+                                       "card_market_ids": [700004]})
+        card = Card.objects.create(game=game("pokemon"), name="Charmander", set_code="SV1", collector_number="004",
+                                   cm_product_id=700004)
+        item = CollectionItem.objects.create(owner=self.user, card=card, condition="NM", language="EN", quantity=1)
+        self.other = Listing.objects.create(item=item, price="1.00", quantity=1, status=Listing.Status.TO_PUBLISH)
+
+    def pikachu(self):
+        return self.ct.blueprints[20][0]
+
+    def assert_fails(self, reason):
+        resp = self.client.post(reverse("ledger:api_publish") + "?game=pokemon")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        texts = [m["text"] for m in resp.json()["messages"] if m["level"] == "warning"]
+        self.assertEqual(texts, [f"Pikachu: {reason}"])
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, Listing.Status.TO_PUBLISH)
+        self.assertNotIn(2001, [p["blueprint_id"] for p in self.ct.products.values()])
+        self.other.refresh_from_db()
+        self.assertEqual(self.other.status, Listing.Status.PUBLISHED)
+        self.assertTrue(SyncLog.objects.filter(owner=self.user, message__contains=f"Pikachu not published ({reason})")
+                        .exists())
+
+    def test_blueprint_without_editable_properties(self):
+        del self.pikachu()["editable_properties"]
+        self.assert_fails(self.UNKNOWN)
+
+    def test_linked_blueprint_missing_from_export(self):
+        Card.objects.filter(name="Pikachu").update(ct_blueprint_id=2050)
+        self.assert_fails(self.UNKNOWN)
+
+    def test_linked_card_whose_expansion_is_gone(self):
+        Card.objects.filter(name="Pikachu").update(ct_blueprint_id=2001, set_code="OLD")
+        self.ct.expansions = [e for e in self.ct.expansions if e["code"] != "old"]
+        Expansion.objects.filter(pk=self.expansion.pk).update(name="Renamed")
+        self.assert_fails(self.UNKNOWN)
+
+    def test_no_language_property(self):
+        self.pikachu()["editable_properties"] = [p for p in POKEMON_PROPS if p["name"] != "pokemon_language"]
+        self.assert_fails(self.UNKNOWN)
+
+    def test_foil_not_offered(self):
+        CollectionItem.objects.filter(pk=self.item.pk).update(foil=True)
+        self.pikachu()["editable_properties"] = [p for p in POKEMON_PROPS if p["name"] != "pokemon_reverse"]
+        self.assert_fails(self.NO_FOIL)
+
+
+class MagicPayloadTest(LedgerTestCase):
+    """A Magic listing's CardTrader payload is what it always was, whatever CardTrader says the blueprint takes."""
+
+    def payload(self, accepted, *, foil=False, product=False):
+        n = Card.objects.count()
+        card = Card.objects.create(game=game(), name=f"Thing {n}", set_code="XYZ", collector_number=str(n),
+                                   ct_blueprint_id=4242 + n, is_product=product)
+        item = CollectionItem.objects.create(owner=self.user, card=card, condition="NM", language="IT", foil=foil,
+                                             quantity=1)
+        listing = Listing.objects.create(item=item, price="2.00", quantity=1)
+        return services.product_payload(listing, accepted)["properties"]
+
+    def test_single_always_sends_language_and_foil(self):
+        expected = {"condition": "Near Mint", "mtg_language": "it", "mtg_foil": True}
+        self.assertEqual(self.payload(["condition"], foil=True), expected)
+        self.assertEqual(self.payload(None, foil=True), expected)
+        self.assertEqual(self.payload([], foil=False), {"condition": "Near Mint", "mtg_language": "it"})
+
+    def test_product(self):
+        self.assertEqual(self.payload(None, product=True), {"mtg_language": "it"})
+        self.assertEqual(self.payload([], product=True), {})
+        self.assertEqual(self.payload(["condition", "mtg_language"], product=True),
+                         {"condition": "Near Mint", "mtg_language": "it"})
