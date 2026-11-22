@@ -9,7 +9,7 @@ from unittest import mock
 
 import httpx
 from botocore.exceptions import ClientError, NoRegionError
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
 
 from . import cardmarket, catalog, catalog_files, catalog_sync
@@ -642,23 +642,17 @@ class ReconcileTest(CatalogSyncTestCase):
 
 
 class SyncCommandTest(TestCase):
-    def test_command_only_enqueues(self):
-        from . import tasks
-
-        with mock.patch.object(tasks.sync_catalog, "delay", return_value=mock.Mock(id="abc")) as delay, \
-                mock.patch.object(catalog_sync, "run_sync") as run:
+    def test_command_runs_sync(self):
+        with mock.patch.object(catalog_sync, "run_sync", return_value=[mock.Mock(), mock.Mock()]) as run:
             out = StringIO()
             call_command("sync_catalog", stdout=out)
-        delay.assert_called_once_with()
-        run.assert_not_called()
-        self.assertIn("Catalog sync queued (task abc)", out.getvalue())
-
-    def test_task_runs_sync(self):
-        from . import tasks
-
-        with mock.patch.object(catalog_sync, "run_sync") as run:
-            tasks.sync_catalog.apply()
         run.assert_called_once_with()
+        self.assertIn("Catalog sync done (2 games)", out.getvalue())
+
+    def test_command_fails_on_unexpected_error(self):
+        with mock.patch.object(catalog_sync, "run_sync", side_effect=catalog_sync.CatalogSyncError("boom")):
+            with self.assertRaisesMessage(CommandError, "Catalog sync failed: boom"):
+                call_command("sync_catalog", stdout=StringIO())
 
     def test_no_beat_schedule(self):
         from config.celery import app

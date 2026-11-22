@@ -139,16 +139,17 @@ reported as missing).
 - **Listing form**: the Cardmarket trend (foil trend for foil copies) is shown and prefills the price of a new
   listing.
 
-The sync runs on a Celery worker (Redis broker). `sync_catalog` only queues it; schedule it every night after
-03:00 (Cardmarket regenerates the price guide around 02:45 CET) with the scheduler of your choice.
+`sync_catalog` runs the sync in its own process (no Celery task is queued) and exits non-zero when a game failed
+unexpectedly; schedule it every night after 03:00 (Cardmarket regenerates the price guide around 02:45 CET) with the
+scheduler of your choice.
 
 ```bash
 docker compose up -d redis
 uv run celery -A config worker --loglevel=info      # the worker
-uv run python manage.py sync_catalog                # queue a sync (outcome in Sync → Activity log)
+uv run python manage.py sync_catalog                # run a sync (outcome in Sync → Activity log)
 ```
 
-With Docker Compose the `worker` and `redis` services start with the stack; queue a sync with
+With Docker Compose the `worker` and `redis` services start with the stack; run a sync with
 `docker compose exec cardledger python manage.py sync_catalog`.
 
 When the catalog files cannot be read (bucket not configured, a game without its file in the bucket, a file that cannot

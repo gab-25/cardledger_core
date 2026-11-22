@@ -29,7 +29,7 @@ uv run python manage.py makemigrations --check --dry-run
 uv run python manage.py spectacular --validate --fail-on-warn --file /dev/null   # OpenAPI schema check
 
 docker compose up -d redis && uv run celery -A config worker --loglevel=info     # catalog sync worker
-uv run python manage.py sync_catalog             # queue the nightly catalog + price sync (run it right after
+uv run python manage.py sync_catalog             # run the nightly catalog + price sync in-process (right after
                                                  # the first migrate: the catalog starts empty)
 ```
 
@@ -81,8 +81,8 @@ There is no linter or formatter configured. Settings come only from the environm
   with `@doc(tags, summary, request=..., parameters=...)`; request bodies are generated from the validating form with
   `form_body()`, so keep the form and the docs in sync through it. Responses are documented as a generic object.
   Swagger UI is public at `/api/docs/`, schema at `/api/schema/`, version read from `pyproject.toml`.
-- **Background work**: Celery with Redis, no beat; tasks (`ledger/tasks.py`) are only queued by management commands
-  and scheduled externally.
+- **Background work**: Celery with Redis, no beat; no tasks are defined: `sync_catalog` runs the sync in-process and is scheduled
+  externally.
 
 ## Tests
 

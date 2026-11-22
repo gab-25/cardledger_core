@@ -236,7 +236,7 @@ def run_sync(bucket=None, cm_client=None):
     """sync() with its outcome written to the SyncLog, one line per game. Returns the results.
 
     Without a usable bucket the prices are still updated. Raises CatalogSyncError, after logging every game, when
-    a game failed unexpectedly, so the task is marked failed."""
+    a game failed unexpectedly, so the command fails."""
     problem = ""
     try:
         bucket = bucket if bucket is not None else CatalogBucket()
@@ -247,7 +247,7 @@ def run_sync(bucket=None, cm_client=None):
     try:
         results = sync(bucket, cm_client, problem)
     except Exception as exc:
-        # Unexpected (database, bug): still visible in the Activity log, and the task is marked failed.
+        # Unexpected (database, bug): still visible in the Activity log, and the command fails.
         logger.exception("Catalog sync failed")
         SyncLog.objects.create(message=f"Catalog sync failed: {type(exc).__name__}: {exc}"[:300],
                                level=SyncLog.Level.WARNING)
