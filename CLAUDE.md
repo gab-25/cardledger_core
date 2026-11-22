@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 CardLedger server: a Django 6 + Django REST Framework app (Python 3.14, managed with `uv`) that holds a trading card
-collection (Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages CardTrader sales. It exposes only a JSON API under `/api/`; the interface is a
+collection (Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages CardTrader sales. It exposes
+only a JSON API under `/api/`; the interface is a
 separate React SPA ([cardledger_ui](https://github.com/gab-25/cardledger_ui)), included as the git submodule `ui/`
 (pinned to a release tag; the Dockerfile builds it in a Node stage), whose built `index.html` Django serves for every
 other URL (`config/views.py`, catch-all route last in `config/urls.py`, files from `UI_APP_DIR`, default `ui/dist`).
@@ -55,10 +56,12 @@ There is no linter or formatter configured. Settings come only from the environm
   points to, tied to its printing by `Card.cm_product_id`; `Blueprint` is a product of the local catalog, keyed by
   its Cardmarket product id (`cm_product`, also the row of its Cardmarket price). **Games**: `Game` (mtg, pokemon,
   lorcana, onepiece, yugioh, riftbound); `Expansion`, `Category` and `Card` belong to a game, uniqueness is per game,
-  and every catalog lookup (recognition, reconcile, resolve_blueprints, API) stays inside one game. Every game API
-  (collection, item, import, export, listings, publish, the pending badge of `me`, catalog, scan setup and sessions)
-  takes `?game=<slug>` through `game_param(params)` / `GAME` in `ledger/api/common.py`: default `mtg`, unknown slug
-  400; `GET /api/games/` lists the games. Orders, shipments, sync and `orders_to_ship` stay global. The catalog is rebuilt only by the nightly `ledger/catalog_sync.py`, with no
+  and every catalog lookup (recognition, reconcile, resolve_blueprints, API) stays inside one game. Collection, import,
+  export, listings, publish, catalog and scan setup take `?game=<slug>` through `game_param(params)` / `GAME` in
+  `ledger/api/common.py` (default `mtg`, unknown slug 400); `GET /api/scan/sessions/` and `me`'s `pending_changes`
+  without `game` cover every game; item and listing detail (`collection/<pk>/`, `listings/<pk>/`) return their `game`;
+  `GET /api/games/` lists the games. Orders, shipments, sync and `orders_to_ship` stay global. The catalog is rebuilt
+  only by the nightly `ledger/catalog_sync.py`, with no
   CardTrader token: it imports the files of the separate generator repo gab-25/cardledger_database from a private
   S3 bucket (`ledger/catalog_files.py`: one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest; the generator is run
   by hand, `cardledger-db generate` then `upload`; settings `CARDLEDGER_CATALOG_*`: bucket, endpoint, region, access
@@ -70,10 +73,11 @@ There is no linter or formatter configured. Settings come only from the environm
   catalog's set code and number, per game. Collection items are added only from the catalog
   (`catalog.card_for_blueprint`); products are stored Near Mint, non-foil. When publishing,
   `services.resolve_blueprints` finds the CardTrader blueprint with the seller's token (CardTrader's `card_market_ids`, then
-  number, then name) and what CardTrader takes for a product (its language is sent only if taken). `services.ct_game_id(client, game)` finds CardTrader's game through `/games`
-  and stores it in `Game.ct_game_id`; expansions are matched per CardTrader game, and `ledger/ct_properties.py`
-  derives the language and foil property names per game from the blueprint's `editable_properties` (Magic's payload is
-  unchanged); a non-Magic listing CardTrader can't describe fails instead of being published. The catalog and
+  number, then name) and what CardTrader takes for a product (its language is sent only if taken).
+  `services.ct_game_id(client, game)` finds CardTrader's game through `/games` and stores it in `Game.ct_game_id`;
+  expansions are matched per CardTrader game, and `ledger/ct_properties.py` derives the language and foil property
+  names per game from the blueprint's `editable_properties` (Magic's payload is unchanged); a non-Magic listing
+  CardTrader can't describe fails instead of being published. The catalog and
   collection JSON keep the old field names (`ct_id`, `category_id`), now holding Cardmarket ids.
 - **Scan pipeline**: photo → `ledger/openrouter.py` (vision model reads the card) → `ledger/recognition.py` (matches
   it to a `Blueprint` of the local catalog) → `ledger/scan.py` (draft lines of a `ScanSession`, saved into the

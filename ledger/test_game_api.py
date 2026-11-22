@@ -61,7 +61,11 @@ class CollectionGameTest(LedgerTestCase):
         pokemon = self.client.get(url, {"game": "pokemon"}).content.decode()
         self.assertIn("Pikachu", pokemon)
         self.assertEqual(len(pokemon.strip().splitlines()), 2)
+        resp = self.client.get(url, {"game": "pokemon"})
+        self.assertIn("cardledger-pokemon-", resp["Content-Disposition"])
+        self.assertTrue(SyncLog.objects.filter(message__startswith="CSV export: Pokémon collection exported").exists())
         magic = self.client.get(url).content.decode()
+        self.assertIn("cardledger-mtg-", self.client.get(url)["Content-Disposition"])
         self.assertNotIn("Pikachu", magic)
         self.assertGreater(len(magic.strip().splitlines()), 1)
 
@@ -94,10 +98,23 @@ class SaleGameTest(LedgerTestCase):
     def test_publish_only_the_game(self):
         self.assertTrue(Listing.objects.owned_by(self.user).filter(status=Listing.Status.TO_PUBLISH)
                         .exclude(pk=self.listing.pk).exists())
+        magic = Listing.objects.owned_by(self.user).filter(status=Listing.Status.TO_PUBLISH).exclude(pk=self.listing.pk)
+        magic_ids = list(magic.values_list("pk", flat=True))
         resp = self.client.post(reverse("ledger:api_publish") + "?game=mtg")
         self.assertEqual(resp.status_code, 200)
         self.listing.refresh_from_db()
         self.assertEqual(self.listing.status, Listing.Status.TO_PUBLISH)
+        self.assertFalse(Listing.objects.filter(pk__in=magic_ids, status=Listing.Status.TO_PUBLISH).exists())
+
+    def test_publish_without_game_is_magic(self):
+        magic_ids = list(Listing.objects.owned_by(self.user).filter(status=Listing.Status.TO_PUBLISH)
+                         .exclude(pk=self.listing.pk).values_list("pk", flat=True))
+        self.assertTrue(magic_ids)
+        resp = self.client.post(reverse("ledger:api_publish"))
+        self.assertEqual(resp.status_code, 200)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, Listing.Status.TO_PUBLISH)
+        self.assertFalse(Listing.objects.filter(pk__in=magic_ids, status=Listing.Status.TO_PUBLISH).exists())
 
     def test_listing_detail_has_game(self):
         resp = self.client.get(reverse("ledger:api_listing", args=[self.item.pk]))

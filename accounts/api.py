@@ -40,7 +40,7 @@ def _user(user):
 def me(request):
     user = request.user
     pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
-    if "game" in request.query_params:
+    if request.query_params.get("game", "").strip():
         pending = pending.filter(item__card__game=game_param(request.query_params))
     return Response({
         "user": _user(user),

@@ -1,8 +1,9 @@
 import json
 
 import httpx
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
+from .models import Game
 from .openrouter import SCHEMA, OpenRouterClient, OpenRouterError, prompt_for
 
 READ = {"name": "Counterspell", "set_code": "DMR", "collector_number": "045", "language": "IT", "foil": True}
@@ -81,19 +82,22 @@ class RecognizeTest(SimpleTestCase):
         self.assertEqual(SCHEMA["required"], ["name", "set_code", "collector_number", "language", "foil"])
 
 
-class PromptTest(SimpleTestCase):
+class PromptTest(TestCase):
     def test_magic_prompt_unchanged(self):
         self.assertEqual(prompt_for("mtg"), MAGIC_PROMPT)
 
     def test_each_game_has_its_prompt(self):
-        for slug, name in GAMES.items():
+        games = Game.objects.all()
+        self.assertTrue(games)
+        for game in games:
+            slug = game.slug
             with self.subTest(slug):
                 prompt = prompt_for(slug)
-                self.assertIn(name, prompt)
+                self.assertIn(game.name, prompt)
                 if slug != "mtg":
                     self.assertNotIn("Magic", prompt)
                     self.assertIn("JSON only", prompt)
-        self.assertEqual(len({prompt_for(slug) for slug in GAMES}), len(GAMES))
+        self.assertEqual(len({prompt_for(g.slug) for g in games}), len(games))
 
     def test_request_uses_the_game_prompt(self):
         seen = {}

@@ -42,6 +42,7 @@ class ProfileTest(TestCase):
         self.assertEqual(self.client.get(url, {"game": "pokemon"}).json()["counts"]["pending_changes"], 1)
         self.assertEqual(self.client.get(url, {"game": "mtg"}).json()["counts"]["pending_changes"], 0)
         self.assertEqual(self.client.get(url).json()["counts"]["pending_changes"], 1)
+        self.assertEqual(self.client.get(url, {"game": ""}).json()["counts"]["pending_changes"], 1)
         self.assertEqual(self.client.get(url, {"game": "chess"}).status_code, 400)
 
     def test_account_reports_cardtrader_not_connected(self):

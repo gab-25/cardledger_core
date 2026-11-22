@@ -11,7 +11,6 @@ from decimal import Decimal
 import httpx
 
 BASE_URL = "https://api.cardtrader.com/api/v2"
-MTG_GAME_ID = 1  # kept for compatibility: the game ids come from Game.ct_game_id (services.ct_game_id)
 
 # Ledger condition codes (Cardmarket-style grades) -> CardTrader "condition" property.
 CONDITION_TO_CT = {

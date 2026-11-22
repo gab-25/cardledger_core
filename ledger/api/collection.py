@@ -224,10 +224,11 @@ def import_csv(request):
 @doc(TAGS, "Download the collection of the game of ?game as CSV", parameters=[GAME])
 @api_view(["GET"])
 def export_csv(request):
-    items = CollectionItem.objects.owned_by(request.user).filter(card__game=game_param(request.query_params))
+    game = game_param(request.query_params)
+    items = CollectionItem.objects.owned_by(request.user).filter(card__game=game)
     response = HttpResponse(content_type="text/csv; charset=utf-8")
     stamp = timezone.localdate().isoformat()
-    response["Content-Disposition"] = f'attachment; filename="cardledger-{stamp}.csv"'
+    response["Content-Disposition"] = f'attachment; filename="cardledger-{game.slug}-{stamp}.csv"'
     services.export_csv(items, response)
-    SyncLog.objects.create(owner=request.user, message=f"CSV export: collection exported ({items.count():,} rows)")
+    SyncLog.objects.create(owner=request.user, message=f"CSV export: {game.name} collection exported ({items.count():,} rows)")
     return response
