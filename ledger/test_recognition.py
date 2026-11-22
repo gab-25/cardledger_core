@@ -136,3 +136,56 @@ class GameMatchTest(MatchBase):
             with self.subTest(read=read):
                 m = match(Recognition(set_code="sv1", collector_number=read, language="EN"), None, self.pokemon)
                 self.assertEqual((m.reason, m.blueprint), ("ok", self.pikachu))
+
+
+class OtherGamesNamesTest(LedgerTestCase):
+    """Catalog names of other games carry attacks / codes; Yu-Gi-Oh! codes can be slugs."""
+
+    def setUp(self):
+        super().setUp()
+        self.pokemon, self.onepiece, self.yugioh = game("pokemon"), game("onepiece"), game("yugioh")
+        self.pal = Expansion.objects.create(game=self.pokemon, code="pal", name="Paldea Evolved")
+        self.arboliva = Blueprint.objects.create(cm_product_id=900001, expansion=self.pal, collector_number="21",
+                                                 name="Arboliva [Enriching Oil | Solar Beam]")
+
+    def test_pokemon_name_with_attacks_is_certain(self):
+        rec = Recognition(name="Arboliva", set_code="pal", collector_number="021", language="EN")
+        m = match(rec, None, self.pokemon)
+        self.assertEqual((m.reason, m.blueprint), ("ok", self.arboliva))
+
+    def test_onepiece_name_with_code_is_certain(self):
+        op07 = Expansion.objects.create(game=self.onepiece, code="op07", name="500 Years in the Future")
+        lucci = Blueprint.objects.create(cm_product_id=900002, expansion=op07, collector_number="OP07-079",
+                                         name="Rob Lucci (OP07-079)")
+        rec = Recognition(name="Rob Lucci", set_code="op07", collector_number="OP07-079", language="EN")
+        m = match(rec, None, self.onepiece)
+        self.assertEqual((m.reason, m.blueprint), ("ok", lucci))
+
+    def test_name_only_match_ignores_suffix(self):
+        m = match(Recognition(name="Arboliva", set_code="pal", language="EN"), None, self.pokemon)
+        self.assertEqual((m.reason, m.blueprint), ("ok", self.arboliva))
+
+    def test_different_card_with_same_prefix_is_not_matched(self):
+        Blueprint.objects.create(cm_product_id=900003, expansion=self.pal, collector_number="22",
+                                 name="Arboliva ex [Big Hit]")
+        m = match(Recognition(name="Arboliva", set_code="pal", language="EN"), None, self.pokemon)
+        self.assertEqual((m.reason, m.blueprint), ("ok", self.arboliva))
+        Blueprint.objects.filter(pk=self.arboliva.pk).delete()
+        m = match(Recognition(name="Arboliva", set_code="pal", language="EN"), None, self.pokemon)
+        self.assertEqual((m.reason, m.candidates), ("not_found", []))
+
+    def test_magic_suffix_is_not_stripped(self):
+        load_catalog()
+        neo = Expansion.objects.get(code="neo")
+        Blueprint.objects.create(cm_product_id=900004, expansion=neo, collector_number="T1", name="Spirit Token (White 1/1)")
+        m = match(Recognition(name="Spirit Token", set_code="neo", language="EN"), neo, game("mtg"))
+        self.assertEqual((m.reason, m.blueprint), ("not_found", None))
+
+    def test_slug_expansion_code(self):
+        from . import catalog
+        agov = Expansion.objects.create(game=self.yugioh, code="agov-age-of-overlord", name="Age of Overlord")
+        self.assertEqual(catalog.expansion_by_code("AGOV", self.yugioh), agov)
+        Expansion.objects.create(game=self.yugioh, code="agov-other", name="Other")
+        self.assertIsNone(catalog.expansion_by_code("agov", self.yugioh))
+        exact = Expansion.objects.create(game=self.yugioh, code="agov", name="Exact")
+        self.assertEqual(catalog.expansion_by_code("agov", self.yugioh), exact)

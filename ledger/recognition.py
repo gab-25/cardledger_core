@@ -52,17 +52,29 @@ def _scope(rec, expansion, game):
     return _catalog(game), False
 
 
-def _by_name(qs, name):
+def _suffixed(game):
+    """Other games' catalog names carry a suffix the card does not print (Pokémon attacks "[...]", One Piece code
+    "(...)"). Magic's suffixes (tokens, versions, art series) tell printings apart: never stripped."""
+    return game is None or game.slug != "mtg"
+
+
+def _by_name(qs, name, game=None):
     name = name.strip()
     if not name:
         return qs.none()
-    return qs.filter(Q(name__iexact=name) | Q(name__istartswith=f"{name} // "))
+    cond = Q(name__iexact=name) | Q(name__istartswith=f"{name} // ")
+    if _suffixed(game):
+        cond |= Q(name__istartswith=f"{name} [") | Q(name__istartswith=f"{name} (")
+    return qs.filter(cond)
 
 
-def same_name(bp, name):
-    """The printing carries the name read (for a split card, its front face)."""
+def same_name(bp, name, game=None):
+    """The printing carries the name read (for a split card, its front face; outside Magic, without its
+    trailing " [...]" or "(...)")."""
     a, b = bp.name.casefold(), name.strip().casefold()
-    return a == b or a.split(" // ")[0] == b
+    if a == b or a.split(" // ")[0] == b:
+        return True
+    return _suffixed(game) and re.sub(r"\s+[\[(][^\[(]*[\])]$", "", a) == b
 
 
 def _number_hits(scope, number):
@@ -74,7 +86,7 @@ def _number_hits(scope, number):
 def _candidates(scope, name, game, hits=()):
     """Cards with the name read first (number hits, then the scope, then anywhere if the scope has none),
     then number hits with another name. Within each group: by Cardmarket product id."""
-    named = list(_by_name(_catalog(game), name).select_related("expansion"))
+    named = list(_by_name(_catalog(game), name, game).select_related("expansion"))
     in_scope = set(scope.filter(pk__in=[b.pk for b in named]).values_list("pk", flat=True))
     if in_scope:
         named = [b for b in named if b.pk in in_scope]
@@ -97,14 +109,14 @@ def match(rec, expansion, game):
 
     if number:
         hits = list(_number_hits(scope, number).select_related("expansion"))
-        named_hits = [h for h in hits if rec.name and same_name(h, rec.name)]
+        named_hits = [h for h in hits if rec.name and same_name(h, rec.name, game)]
         if len(named_hits) == 1 or (len(hits) == 1 and not rec.name.strip()):
             certain = (named_hits or hits)[0]
         elif hits:
             return Match(None, _candidates(scope, rec.name, game, hits), "ambiguous")
 
     if certain is None:
-        named = list(_by_name(scope, rec.name).select_related("expansion")[:2])
+        named = list(_by_name(scope, rec.name, game).select_related("expansion")[:2])
         if len(named) != 1:
             candidates = _candidates(scope, rec.name, game)
             return Match(None, candidates, "ambiguous" if candidates else "not_found")
