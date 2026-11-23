@@ -117,7 +117,7 @@ class SessionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ScanSession
-        fields = ["uuid", "status", "game", "expansion", "default_condition", "count", "last_line",
+        fields = ["uuid", "status", "game", "expansion", "default_condition", "default_language", "count", "last_line",
                   "is_phone", "phone_url", "phone_secure"]
         read_only_fields = fields
 
@@ -152,6 +152,7 @@ class ChoiceSerializer(serializers.Serializer):
 class SetupDefaultsSerializer(serializers.Serializer):
     expansion_id = serializers.IntegerField(allow_null=True)
     condition = serializers.CharField()
+    language = serializers.CharField()
 
 
 class MissingServiceSerializer(serializers.Serializer):
@@ -245,6 +246,7 @@ class SessionCreateSerializer(serializers.Serializer):
     )
     condition = serializers.ChoiceField(Condition.choices, default=Condition.NEAR_MINT,
                                         help_text="The default condition of the scanned cards")
+    language = LanguageField(default=Language.EN, help_text="The default language of the scanned cards")
 
     def validate(self, attrs):
         attrs["game"] = attrs["game"] or Game.by_slug(MAGIC)

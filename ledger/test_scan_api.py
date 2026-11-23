@@ -76,9 +76,11 @@ class ScanApiBase(LedgerTestCase):
         return getattr(self.client, method)(reverse(f"ledger:{name}", args=args), body,
                                             content_type="application/json", **extra)
 
-    def start(self, expansion_id=None, condition="NM"):
-        resp = self.call("post", "scan_api_sessions",
-                         data={"expansion_id": expansion_id or self.dmr.pk, "condition": condition})
+    def start(self, expansion_id=None, condition="NM", language=None):
+        data = {"expansion_id": expansion_id or self.dmr.pk, "condition": condition}
+        if language:
+            data["language"] = language
+        resp = self.call("post", "scan_api_sessions", data=data)
         self.assertEqual(resp.status_code, 201, resp.content)
         return ScanSession.objects.get(uuid=resp.json()["session"]["uuid"])
 
@@ -111,13 +113,49 @@ class SetupAndSessionTest(ScanApiBase):
         self.assertIn({"id": self.dmr.pk, "code": "dmr", "name": "Dominaria Remastered"}, body["expansions"])
         self.assertIn({"code": "NM", "label": "Near Mint"}, body["conditions"])
         self.assertIn({"code": "IT", "label": "Italian"}, body["languages"])
-        self.assertEqual(body["defaults"], {"expansion_id": None, "condition": "NM"})
+        self.assertEqual(body["defaults"], {"expansion_id": None, "condition": "NM", "language": "EN"})
         self.assertEqual((body["missing"], body["warnings"]), ([], []))
 
     def test_setup_defaults_follow_the_last_session(self):
         self.start(condition="EX")
         self.assertEqual(self.call("get", "scan_api_setup").json()["defaults"],
-                         {"expansion_id": self.dmr.pk, "condition": "EX"})
+                         {"expansion_id": self.dmr.pk, "condition": "EX", "language": "EN"})
+
+    def test_setup_defaults_to_last_session_language(self):
+        self.start(language="it")
+        self.assertEqual(self.call("get", "scan_api_setup").json()["defaults"]["language"], "IT")
+
+    def test_session_created_with_language(self):
+        session = self.start(language="IT")
+        self.assertEqual(session.default_language, "IT")
+        resp = self.call("get", "scan_api_session", session.uuid)
+        self.assertEqual(resp.json()["session"]["default_language"], "IT")
+
+    def test_language_defaults_to_en(self):
+        self.assertEqual(self.start().default_language, "EN")
+
+    def test_unknown_language_is_400(self):
+        self.assertInvalid(self.call("post", "scan_api_sessions", data={"language": "KL"}), "language")
+
+    def test_capture_line_uses_session_language_not_foil(self):
+        session = self.start(language="IT")
+        self.recognizer.result = Recognition(name="Counterspell", set_code="dmr", collector_number="045",
+                                             language="EN", foil=True)
+        line = self.capture(session).json()["line"]
+        self.assertEqual((line["language"], line["foil"]), ("IT", False))
+
+    def test_unsure_capture_keeps_candidates_and_frame(self):
+        session = self.start()
+        body = self.uncertain_capture(session)
+        self.assertEqual(body["result"], "confirm")
+        line = ScanLine.objects.get(uuid=body["line"]["uuid"])
+        self.assertTrue(line.needs_confirmation)
+        self.assertTrue(line.candidates)
+        self.assertTrue(bytes(line.frame))
+
+    def uncertain_capture(self, session):
+        self.recognizer.result = Recognition(name="Counterspell", language="")
+        return self.capture(session).json()
 
     def test_start_preloads_catalog(self):
         resp = self.call("post", "scan_api_sessions", data={"expansion_id": self.dmr.pk, "condition": "EX"})
@@ -155,7 +193,7 @@ class SetupAndSessionTest(ScanApiBase):
         line = body["last_line"]
         self.assertEqual(line["blueprint"]["id"], cm_id(1201))
         self.assertEqual(line["blueprint"]["expansion"]["code"], "dmr")
-        self.assertEqual((line["language"], line["condition"]), ("IT", "NM"))
+        self.assertEqual((line["language"], line["condition"]), ("EN", "NM"))
         for gone in ("price", "for_sale", "listed"):
             self.assertNotIn(gone, line)
 
@@ -435,8 +473,8 @@ class ConfirmTest(ScanApiBase):
         Blueprint.objects.create(cm_product_id=cm_id(1299), expansion=dmr, name="Ponder", collector_number="45")
         self.recognizer.result = Recognition(name="Lotus Petal", set_code="dmr", collector_number="045", language="EN")
         line = self.capture(session).json()["line"]
-        self.assertEqual(line["read_name"], "Lotus Petal")
-        self.assertEqual([(c["id"], c["matches_name"]) for c in line["candidates"]], [(cm_id(1201), False), (cm_id(1299), False)])
+        self.assertEqual(line["read_name"], "Counterspell")
+        self.assertEqual([(c["id"], c["matches_name"]) for c in line["candidates"]], [(cm_id(1201), True), (cm_id(1299), False)])
         self.recognizer.result = Recognition(name="Counterspell", set_code="dmr", collector_number="45", language="")
         line = self.capture(session, "c2").json()["line"]
         self.assertEqual([(c["id"], c["matches_name"]) for c in line["candidates"]], [(cm_id(1201), True)])
@@ -653,9 +691,9 @@ class ScanGameTest(ScanApiBase):
         self.start(condition="EX")
         self.start_in("pokemon", expansion_id=self.sv1.pk, condition="GD")
         self.assertEqual(self.call("get", "scan_api_setup").json()["defaults"],
-                         {"expansion_id": self.dmr.pk, "condition": "EX"})
+                         {"expansion_id": self.dmr.pk, "condition": "EX", "language": "EN"})
         self.assertEqual(self.client.get(reverse("ledger:scan_api_setup"), {"game": "pokemon"}).json()["defaults"],
-                         {"expansion_id": self.sv1.pk, "condition": "GD"})
+                         {"expansion_id": self.sv1.pk, "condition": "GD", "language": "EN"})
 
     def test_sessions_list_per_game(self):
         magic = self.start()

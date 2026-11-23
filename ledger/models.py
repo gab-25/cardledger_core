@@ -457,6 +457,7 @@ class ScanSession(models.Model):
     game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="scan_sessions")
     expansion = models.ForeignKey(Expansion, null=True, blank=True, on_delete=models.SET_NULL)
     default_condition = models.CharField(max_length=2, choices=Condition.choices, default=Condition.NEAR_MINT)
+    default_language = models.CharField(max_length=3, choices=Language.choices, default=Language.EN)
     status = models.CharField(max_length=5, choices=Status.choices, default=Status.OPEN)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

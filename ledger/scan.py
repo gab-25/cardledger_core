@@ -11,9 +11,11 @@ class ScanError(Exception):
     pass
 
 
-def start_session(owner, game, expansion, condition):
+def start_session(owner, game, expansion, condition, language):
     """New session for owner, scanning cards of game (expansion: one of game's, or None for all)."""
-    return ScanSession.objects.create(owner=owner, game=game, expansion=expansion, default_condition=condition)
+    return ScanSession.objects.create(
+        owner=owner, game=game, expansion=expansion, default_condition=condition, default_language=language,
+    )
 
 
 def open_sessions(owner, game=None):
@@ -82,19 +84,19 @@ def release_capture(capture):
         capture.delete()
 
 
-def add_capture(session, rec, m, *, frame, capture_id="", capture=None):
-    """Add what one camera capture recognised. Returns (line, merged); a repeated capture id changes nothing."""
+def add_capture(session, m, *, frame, capture_id="", capture=None):
+    """Add what one camera capture recognised, in the session's language and not foil. Returns (line, merged); a repeated capture id changes nothing."""
     if capture is None and capture_id:
         capture, created = reserve_capture(session, capture_id)
         if not created:
             return capture.line, False
     if m.blueprint is not None:
-        line, merged = _add_certain(session, m.blueprint, rec.language, rec.foil)
+        line, merged = _add_certain(session, m.blueprint, session.default_language, False)
     else:
         line = ScanLine.objects.create(
-            session=session, language=rec.language, foil=rec.foil, condition=session.default_condition,
+            session=session, language=session.default_language, foil=False, condition=session.default_condition,
             needs_confirmation=True, candidates=[b.cm_product_id for b in m.candidates], frame=frame,
-            read_name=rec.name.strip()[:200],
+            read_name=m.candidates[0].name[:200] if m.candidates else "",
         )
         merged = False
     if capture is not None:

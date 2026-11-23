@@ -117,6 +117,7 @@ def setup(request):
         "defaults": {
             "expansion_id": last.expansion_id if last else None,
             "condition": last.default_condition if last else Condition.NEAR_MINT,
+            "language": last.default_language if last else Language.EN,
         },
         "missing": [{"message": message, "url": url} for message, url in _missing_services(request.user, game)],
         "warnings": warnings,
@@ -138,7 +139,8 @@ def sessions(request):
         return Response(s.SessionListSerializer({"results": listed}, context={"request": request}).data)
     data = _validated(s.SessionCreateSerializer, request.data)
     expansion = data["expansion_id"]
-    session = scan.start_session(request.user, data["game"], expansion, data["condition"])
+    session = scan.start_session(request.user, data["game"], expansion, data["condition"],
+                                 data["language"])
     body = s.SessionCreatedSerializer({"session": session, "warnings": []}, context={"request": request})
     return Response(body.data, status=status.HTTP_201_CREATED)
 
@@ -200,7 +202,7 @@ def captures(request, uid):
                 scan.release_capture(capture)
                 return _capture_result("no_card", "No card in the picture — frame a card", session)
             found = recognition.match(rec, session.expansion, session.game)
-            done, _ = scan.add_capture(session, rec, found, frame=image, capture=capture)
+            done, _ = scan.add_capture(session, found, frame=image, capture=capture)
         except OpenRouterError as exc:
             scan.release_capture(capture)
             reason = str(exc)[:160]
