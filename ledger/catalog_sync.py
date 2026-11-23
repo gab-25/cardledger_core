@@ -23,7 +23,7 @@ from django.db import transaction
 from . import cardmarket, catalog
 from .cardmarket import PRICE_FIELDS, CardmarketError
 from .catalog_files import CatalogBucket, CatalogFileMissing, CatalogFilesError
-from .models import Blueprint, CardmarketPrice, Category, Expansion, Game
+from .models import Blueprint, CardmarketPrice, Category, Expansion, Game, GameVisionIndex
 
 BATCH = 2000
 # A game's blueprints missing from its file are removed only when the file holds at least this share of that game's
@@ -175,12 +175,10 @@ def _sync_vision(bucket, game):
     except CatalogFileMissing:
         return "missing"
     digest = hashlib.sha256(data).hexdigest()
-    if game.vision_index is not None and game.vision_sha256 == digest:
+    if GameVisionIndex.objects.filter(game=game).values_list("sha256", flat=True).first() == digest:
         return "unchanged"
     Index.load(data)  # InvalidIndex when the bytes are not an index
-    game.vision_index = data
-    game.vision_sha256 = digest
-    game.save(update_fields=["vision_index", "vision_sha256"])
+    GameVisionIndex.objects.update_or_create(game=game, defaults={"data": data, "sha256": digest})
     return "updated"
 
 

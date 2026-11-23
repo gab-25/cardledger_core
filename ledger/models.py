@@ -66,13 +66,6 @@ class Game(models.Model):
         max_length=64, blank=True, help_text="sha256 of the catalog file last imported (the sync skips the same file)",
     )
 
-    vision_index = models.BinaryField(
-        null=True, blank=True, editable=False, help_text="the game's vision index file (cardledger_vision)",
-    )
-    vision_sha256 = models.CharField(
-        max_length=64, blank=True, help_text="sha256 of the vision index last stored (the sync skips the same file)",
-    )
-
     class Meta:
         ordering = ["name"]
 
@@ -83,6 +76,18 @@ class Game(models.Model):
     def by_slug(cls, slug):
         """The game with this slug; Game.DoesNotExist when there is none."""
         return cls.objects.get(slug=slug)
+
+
+class GameVisionIndex(models.Model):
+    """A game's vision index file (cardledger_vision), apart from Game so that loading a game never loads it."""
+
+    game = models.OneToOneField(Game, on_delete=models.CASCADE, related_name="vision")
+    data = models.BinaryField(editable=False)
+    sha256 = models.CharField(max_length=64, help_text="sha256 of the file stored (the sync skips the same file)")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.game} vision index"
 
 
 class Card(models.Model):

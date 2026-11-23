@@ -16,8 +16,8 @@ from django.test import TestCase, override_settings
 from . import cardmarket, catalog, catalog_files, catalog_sync
 from .catalog_files import CatalogBucket, catalog_key
 from .models import (
-    Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, Listing, ScanLine, ScanSession,
-    SyncLog,
+    Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, GameVisionIndex, Listing, ScanLine,
+    ScanSession, SyncLog,
 )
 from .tests import LedgerTestCase, game, load_catalog
 
@@ -404,16 +404,16 @@ class VisionIndexTest(CatalogSyncTestCase):
         data = vision_bytes()
         self.files.vision["mtg"] = data
         results = self.sync()
-        magic = game()
-        self.assertEqual(bytes(magic.vision_index), data)
-        self.assertEqual(magic.vision_sha256, hashlib.sha256(data).hexdigest())
+        stored = GameVisionIndex.objects.get(game=game())
+        self.assertEqual(bytes(stored.data), data)
+        self.assertEqual(stored.sha256, hashlib.sha256(data).hexdigest())
         self.assertEqual(results["mtg"].vision, "updated")
         self.assertEqual(self.files.vision_reads, ["vision/v1/mtg.bin", "vision/v1/pokemon.bin"])
 
     def test_unchanged_index_is_skipped(self):
         self.files.vision["mtg"] = vision_bytes()
         self.sync()
-        with mock.patch.object(Game, "save", side_effect=AssertionError("written")):
+        with mock.patch.object(GameVisionIndex.objects, "update_or_create", side_effect=AssertionError("written")):
             results = self.sync()
         self.assertEqual(results["mtg"].vision, "unchanged")
 
@@ -423,7 +423,7 @@ class VisionIndexTest(CatalogSyncTestCase):
         newer = vision_bytes(name="Ponder")
         self.files.vision["mtg"] = newer
         self.assertEqual(self.sync()["mtg"].vision, "updated")
-        self.assertEqual(bytes(game().vision_index), newer)
+        self.assertEqual(bytes(GameVisionIndex.objects.get(game=game()).data), newer)
 
     def test_missing_index_keeps_previous(self):
         data = vision_bytes()
@@ -432,7 +432,7 @@ class VisionIndexTest(CatalogSyncTestCase):
         del self.files.vision["mtg"]
         results = self.sync()
         self.assertEqual(results["mtg"].vision, "missing")
-        self.assertEqual(bytes(game().vision_index), data)
+        self.assertEqual(bytes(GameVisionIndex.objects.get(game=game()).data), data)
 
     def test_corrupt_index_is_rejected(self):
         data = vision_bytes()
@@ -442,8 +442,9 @@ class VisionIndexTest(CatalogSyncTestCase):
         self.files.vision["pokemon"] = vision_bytes("pokemon")
         results = self.sync()
         self.assertIn("Invalid", results["mtg"].vision)
-        self.assertEqual(bytes(game().vision_index), data)
-        self.assertEqual(game().vision_sha256, hashlib.sha256(data).hexdigest())
+        stored = GameVisionIndex.objects.get(game=game())
+        self.assertEqual(bytes(stored.data), data)
+        self.assertEqual(stored.sha256, hashlib.sha256(data).hexdigest())
         self.assertEqual(results["pokemon"].vision, "updated")
         self.assertEqual(results["pokemon"].error, "")
 
@@ -454,7 +455,7 @@ class VisionIndexTest(CatalogSyncTestCase):
         self.assertIn("Cannot read", mtg.vision)
         self.assertEqual((mtg.imported, mtg.error, mtg.blueprints, mtg.priced), (True, "", 7, 2))
         self.assertTrue(CardmarketPrice.objects.filter(pk=501201).exists())
-        self.assertIsNone(game().vision_index)
+        self.assertFalse(GameVisionIndex.objects.filter(game=game()).exists())
 
     def test_unexpected_vision_error_does_not_fail_catalog(self):
         with mock.patch("ledger.catalog_sync.Index.load", side_effect=RuntimeError("boom")):
