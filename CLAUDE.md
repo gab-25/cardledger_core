@@ -32,6 +32,8 @@ uv run python manage.py spectacular --validate --fail-on-warn --file /dev/null  
 docker compose up -d redis && uv run celery -A config worker --loglevel=info     # catalog sync worker
 uv run python manage.py sync_catalog             # run the nightly catalog + price sync in-process (right after
                                                  # the first migrate: the catalog starts empty)
+uv run python manage.py snapshot_stock_values    # today's stock value per user and game (schedule daily, e.g. cron
+                                                 # after sync_catalog, which also runs it)
 ```
 
 There is no linter or formatter configured. Settings come only from the environment / `.env` (see `.env.example`);
@@ -201,8 +203,40 @@ There is no linter or formatter configured. Settings come only from the environm
   with `@doc(tags, summary, request=..., parameters=...)`; request bodies are generated from the validating form with
   `form_body()`, so keep the form and the docs in sync through it. Responses are documented as a generic object.
   Swagger UI is public at `/api/docs/`, schema at `/api/schema/`, version read from `pyproject.toml`.
+- **Purchases** (`ledger/purchases.py`, views `ledger/api/purchases.py`, `/api/purchases/`): `PurchaseLot(user, number,
+  code "PL-0001" per-user sequence (`purchases.create` locks the user row), type, seller, where, cards_estimate,
+  price_paid, paid_by, bought_on, next_step, status in_post|received|grading|listing|done, notes)` +
+  `PurchaseAttachment` (PDF/PNG/JPEG/GIF/WebP ≤ 10 MB, stored as `purchases/<uuid>.<ext>` in the default storage,
+  served by `/media/`). `CollectionItem.lot` and `ScanSession.lot` (SET_NULL; `scan.save_session` gives the saved items,
+  new or merged, the session's lot). Figures are computed from the items, every count in copies (rules in the
+  `ledger/purchases.py` docstring: graded = sorted, total = max(sorted, cards_estimate), trend_value/return_pct null
+  without a trend). List `?tab=all|to_grade|listing|done` (to_grade = in_post/received/grading, `PurchaseLot.TO_PROCESS`)
+  with tabs, KPIs (30 days by bought_on) and pages; `next-code/`; `<id>/` GET/PATCH (partial)/DELETE (items keep, files
+  deleted); `<id>/attachments/` (multipart `file`), `<id>/attachments/<aid>/` GET/DELETE; `<id>/list/ {markets}` lists
+  the unlisted items through `repricer.quote` + `put_on_sale`; `<id>/allocate-cost/` (cost = price_paid × trend /
+  lot trend value). Collection `?lot=<code>`, rows/detail `lot`, POST/PUT `lot` (code; PUT: absent keeps, blank
+  clears); scan session create and `PATCH sessions/<uuid>/` take `lot`. `me.counts.lots_to_process`.
+- **Reports** (`ledger/api/reports.py`, `/api/reports/?from&to&game&market`, `sets.csv`): computed in Python from the
+  orders paid in the range (canceled/merged out); rules in the module docstring (net = net or total − fee, line net
+  shared by line value, profit over lines whose item has a cost, game filter shares an order by its lines' value,
+  postage = the counted orders' shipments, days_to_sell a number).
+- **History** (`ledger/snapshots.py`): `PriceSnapshot(cm_product_id, date, trend, trend_foil)` written by the catalog
+  sync per game after its prices (raw SQL: only products whose trends changed since their latest snapshot, dated the
+  guide's local date; pruned past 400 days keeping the value at the cutoff); catalog rows `change_30d` (vs the latest
+  snapshot ≤ 30 days ago, foil with `finish=foil`) and `GET /api/catalog/<ct_id>/history/?days=` (first point carried
+  to the window start). `StockValueSnapshot(user, game, date, value)` by `snapshot_stock_values` (command, and the end of
+  `catalog_sync.run_sync`); collection `stats.value_week_ago` = latest snapshot 7-13 days old.
+- **Saved views** (`ledger/api/saved_views.py`, `/api/collection/views/?game=`): `SavedView(user, game, name, query,
+  position)`; the query is stored without `page`/`game`; position moves/renumbers like repricing rules.
+- **Locations** (`ledger/api/locations.py`, `/api/locations/`): `Location(user, code unique per user, capacity, note)`;
+  used = copies of items with that location (every game), free = capacity − used (may be negative); codes used only
+  on items are listed with `id: null`; renaming a code moves the items; `suggest/?copies=` = most free slots ≥ copies.
+- **Overview extras**: `?game=all`, `?market=`, `?period=7d|30d|qtd|ytd` (rules in the `ledger/api/overview.py`
+  docstring: orders stay global, `*_30d` follow the period, sell-through = sold / (stock now + sold), weeks split
+  singles/sealed by the line's card, alerts orders_to_pack/below_trend/not_listed/stale/locations_full with tone
+  danger|warn|info and SPA hrefs).
 - **Background work**: Celery with Redis, no beat; no tasks are defined: `sync_catalog` runs the sync in-process and is scheduled
-  externally.
+  externally, like `snapshot_stock_values` (daily).
 
 ## Tests
 

@@ -51,6 +51,8 @@ def _form_field(field):
         return serializers.JSONField(**kwargs)
     if isinstance(field, forms.FileField):
         return serializers.FileField(**kwargs)
+    if isinstance(field, forms.DateField):
+        return serializers.DateField(**kwargs)
     kwargs.update(max_length=field.max_length, allow_blank=not field.required)
     if isinstance(field, forms.EmailField):
         return serializers.EmailField(**kwargs)

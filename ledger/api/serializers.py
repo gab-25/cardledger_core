@@ -118,11 +118,13 @@ class SessionSerializer(serializers.ModelSerializer):
     is_phone = serializers.SerializerMethodField()
     phone_url = serializers.SerializerMethodField(help_text="This session's scan page, to open on a phone")
     phone_secure = serializers.SerializerMethodField(help_text="False: the phone won't allow the camera (no HTTPS)")
+    lot = serializers.SlugRelatedField(slug_field="code", read_only=True, allow_null=True,
+                                       help_text="Code of the purchase lot the saved items get (null: none)")
 
     class Meta:
         model = ScanSession
         fields = ["uuid", "status", "game", "expansion", "default_condition", "default_language", "count", "last_line",
-                  "is_phone", "phone_url", "phone_secure"]
+                  "is_phone", "phone_url", "phone_secure", "lot"]
         read_only_fields = fields
 
     def get_count(self, session) -> int:
@@ -251,6 +253,11 @@ class SessionCreateSerializer(serializers.Serializer):
     condition = serializers.ChoiceField(Condition.choices, default=Condition.NEAR_MINT,
                                         help_text="The default condition of the scanned cards")
     language = LanguageField(default=Language.EN, help_text="The default language of the scanned cards")
+    lot = serializers.CharField(max_length=20, required=False, allow_blank=True, allow_null=True, default=None,
+                                help_text='Code of one of your purchase lots ("PL-0001"): the saved items get it')
+
+    def validate_lot(self, value):
+        return lot_of(self.context["user"], value)
 
     def validate(self, attrs):
         attrs["game"] = attrs["game"] or Game.by_slug(MAGIC)
@@ -258,6 +265,27 @@ class SessionCreateSerializer(serializers.Serializer):
         if expansion is not None and expansion.game_id != attrs["game"].pk:
             raise serializers.ValidationError({"expansion_id": [f"Not an expansion of {attrs['game'].name}."]})
         return attrs
+
+
+def lot_of(user, code):
+    """The user's purchase lot of a code (blank or null: None); an unknown code is a validation error."""
+    from ..purchases import lot_by_code
+
+    code = (code or "").strip()
+    if not code:
+        return None
+    lot = lot_by_code(user, code)
+    if lot is None:
+        raise serializers.ValidationError(f"Unknown purchase lot '{code}'.")
+    return lot
+
+
+class SessionUpdateSerializer(serializers.Serializer):
+    lot = serializers.CharField(max_length=20, allow_blank=True, allow_null=True,
+                                help_text='Code of one of your purchase lots ("PL-0001"); blank or null: none')
+
+    def validate_lot(self, value):
+        return lot_of(self.context["user"], value)
 
 
 class CaptureSerializer(serializers.Serializer):

@@ -25,7 +25,7 @@ from ledger.api.common import (GAME, doc, form_body, form_errors, form_fields, g
 from ledger.api.orders import to_pack_count
 from ledger.api.shipments import problem_count
 from ledger.extension import extension_state
-from ledger.models import CardmarketPrice, CollectionItem, Listing, Order, RepricingRule
+from ledger.models import CardmarketPrice, CollectionItem, Listing, Order, PurchaseLot, RepricingRule
 
 from .forms import BusinessForm, BusinessProfileForm, LoginForm, LogoForm, ProfileForm, SellerSettingsForm
 from .models import AuditEvent, business_of, profile_of, record, seller_settings_of
@@ -52,7 +52,7 @@ def _user(user):
 @doc(TAGS, "The logged-in user, the sidebar counters (?game limits pending_changes, copies and live_listings to a "
            "game; orders_to_pack: to pack or being picked, shipment_problems: late or untracked past their expected "
            "date, both of every market; rules_on: enabled repricing rules that are not drafts, rules_total: all "
-           "of them), the marketplaces' state (Cardmarket and CardTrader, with the seller handle), whether the browser "
+           "of them; lots_to_process: purchase lots in the post, received or grading), the marketplaces' state (Cardmarket and CardTrader, with the seller handle), whether the browser "
            "extension is paired (and when it was last seen) and the date of the latest Cardmarket price guide. "
            "Each market's status is its connection's (both are synced by the extension): off until the extension is "
            "paired, never (never synced), ok, error (the last sync failed)",
@@ -80,6 +80,7 @@ def me(request):
             "shipment_problems": problem_count(user),
             "rules_on": rules.filter(enabled=True, draft=False).count(),
             "rules_total": rules.count(),
+            "lots_to_process": PurchaseLot.objects.owned_by(user).filter(status__in=PurchaseLot.TO_PROCESS).count(),
         },
         "markets": ledger_services.market_states(user),
         "extension": extension_state(user),

@@ -1,8 +1,8 @@
 from django.contrib import admin
 
-from .models import (Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, Listing,
-                     MarketConnection, ExtensionToken, MissingCardReport, Order, OrderItem, Shipment, SyncConflict,
-                     SyncLog)
+from .models import (Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, Listing, Location,
+                     MarketConnection, ExtensionToken, MissingCardReport, Order, OrderItem, PurchaseAttachment,
+                     PurchaseLot, Shipment, SyncConflict, SyncLog)
 
 
 @admin.register(Card)
@@ -118,3 +118,23 @@ class ExtensionTokenAdmin(admin.ModelAdmin):
     list_filter = ["revoked"]
     raw_id_fields = ["user"]
     readonly_fields = ["key"]
+
+
+class PurchaseAttachmentInline(admin.TabularInline):
+    model = PurchaseAttachment
+    extra = 0
+
+
+@admin.register(PurchaseLot)
+class PurchaseLotAdmin(admin.ModelAdmin):
+    list_display = ["code", "user", "type", "seller", "price_paid", "bought_on", "status"]
+    list_filter = ["type", "status"]
+    search_fields = ["code", "seller"]
+    raw_id_fields = ["user"]
+    inlines = [PurchaseAttachmentInline]
+
+
+@admin.register(Location)
+class LocationAdmin(admin.ModelAdmin):
+    list_display = ["code", "user", "capacity", "note"]
+    raw_id_fields = ["user"]

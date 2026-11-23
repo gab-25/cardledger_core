@@ -136,7 +136,7 @@ class MeTest(TestCase):
         self.assertEqual(self.me()["counts"]["copies"], 2)
         self.assertEqual(self.me(game="pokemon")["counts"], {"pending_changes": 0, "orders_to_ship": 0,
                                                              "copies": 2, "live_listings": 1, "orders_to_pack": 0,
-                                                             "shipment_problems": 0, "rules_on": 0, "rules_total": 0})
+                                                             "shipment_problems": 0, "rules_on": 0, "rules_total": 0, "lots_to_process": 0})
         self.assertEqual(self.me(game="mtg")["counts"]["copies"], 0)
         self.assertEqual(self.me(game="mtg")["counts"]["live_listings"], 0)
         self.client.force_login(self.other)

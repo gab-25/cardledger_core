@@ -559,7 +559,8 @@ class RepricingSchemaTest(RepricingTestCase):
         self.assertEqual(body("/api/repricing/adhoc/", "post"),
                          {"ids", "mode", "value", "unit", "basis", "markets", "dry_run"})
         self.assertEqual(body("/api/collection/", "post"),
-                         {"blueprint", "condition", "language", "foil", "quantity", "cost", "location", "list_on"})
+                         {"blueprint", "condition", "language", "foil", "quantity", "cost", "location", "list_on",
+                      "lot"})
         self.assertIn("reprice_before_sync", body("/api/account/settings/", "put"))
         query = {p["name"] for p in schema["paths"]["/api/repricing/quote/"]["get"]["parameters"]}
         self.assertEqual(query, {"blueprint", "condition", "language", "foil", "cost"})

@@ -8,7 +8,8 @@ from accounts.models import seller_settings_of
 
 from . import catalog
 from . import repricing
-from .models import Blueprint, Card, CollectionItem, Condition, Language, Listing, Market, RepricingRule, Shipment
+from .models import (Blueprint, Card, CollectionItem, Condition, Language, Listing, Location, Market, PurchaseLot,
+                     RepricingRule, SavedView, Shipment)
 
 
 def get_or_create_card(game, name, set_code, collector_number="", **defaults):
@@ -41,10 +42,14 @@ class CatalogItemForm(forms.Form):
     list_on = forms.MultipleChoiceField(choices=Market.choices, required=False,
                                         help_text="Create listings (to publish) of the copies added on these markets, "
                                                   "at the price the repricing rules quote")
+    lot = forms.CharField(max_length=20, required=False, help_text='Code of one of your purchase lots ("PL-0001")')
 
     def __init__(self, *args, owner, **kwargs):
         super().__init__(*args, **kwargs)
         self.owner = owner
+
+    def clean_lot(self):
+        return clean_lot(self.owner, self.cleaned_data.get("lot"))
 
     def clean_blueprint(self):
         bp = Blueprint.objects.select_related("expansion", "category").filter(cm_product_id=self.cleaned_data["blueprint"]).first()
@@ -69,6 +74,8 @@ class CatalogItemForm(forms.Form):
         extra = {"location": data["location"].strip()} if data.get("location", "").strip() else {}
         if data.get("cost") is not None:
             extra["cost"] = data["cost"]
+        if data.get("lot") is not None:
+            extra["lot"] = data["lot"]
         item = CollectionItem.objects.filter(**stack).order_by("pk").first()
         if item is None:
             return CollectionItem.objects.create(**stack, quantity=data["quantity"], **extra), False
@@ -90,25 +97,47 @@ def keep_absent(data, instance, names):
     return data
 
 
+def clean_lot(owner, code):
+    """The owner's purchase lot of a code (blank: None); an unknown code is a validation error."""
+    from .purchases import lot_by_code
+
+    code = (code or "").strip()
+    if not code:
+        return None
+    lot = lot_by_code(owner, code)
+    if lot is None:
+        raise forms.ValidationError(f"Unknown purchase lot '{code}'.")
+    return lot
+
+
 class ItemForm(forms.ModelForm):
-    """Edits the copies of a collection item; the product they are copies of never changes. cost and location are
-    optional: left out, they keep their value."""
+    """Edits the copies of a collection item; the product they are copies of never changes. cost, location and lot
+    are optional: left out, they keep their value (lot: a lot code, blank clears it)."""
 
     OPTIONAL = ["cost", "location"]
 
     cost = forms.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"), required=False,
                               help_text="Purchase price of one copy")
+    lot = forms.CharField(max_length=20, required=False,
+                          help_text='Code of one of your purchase lots ("PL-0001"); blank: none; absent: unchanged')
 
     class Meta:
         model = CollectionItem
         fields = ["condition", "language", "foil", "quantity", "cost", "location"]
 
     def __init__(self, data=None, *args, instance=None, **kwargs):
+        self.lot_sent = data is not None and "lot" in data
         super().__init__(keep_absent(data, instance, self.OPTIONAL), *args, instance=instance, **kwargs)
+
+    def clean_lot(self):
+        if not self.lot_sent:
+            return self.instance.lot
+        return clean_lot(self.instance.owner, self.cleaned_data.get("lot"))
 
     def save(self, commit=True):
         if self.instance.card.is_product:
             self.instance.condition, self.instance.foil = PRODUCT_CONDITION, False
+        self.instance.lot = self.cleaned_data.get("lot")
         return super().save(commit=commit)
 
 
@@ -318,3 +347,120 @@ class AdhocForm(forms.Form):
             elif data.get("mode") == "trend_pct" and value <= -100:
                 self.add_error("value", "Over -100%.")
         return data
+
+
+class PurchaseForm(forms.ModelForm):
+    """A purchase lot; a field left out keeps its value (on create: the model's default, bought_on today)."""
+
+    FIELDS = ["type", "seller", "where", "cards_estimate", "price_paid", "paid_by", "bought_on", "next_step", "status",
+              "notes"]
+
+    price_paid = forms.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"), required=False,
+                                    help_text="What the lot cost (default 0)")
+    bought_on = forms.DateField(required=False, help_text="YYYY-MM-DD (default today)")
+
+    class Meta:
+        model = PurchaseLot
+        fields = ["type", "seller", "where", "cards_estimate", "price_paid", "paid_by", "bought_on", "next_step",
+                  "status", "notes"]
+
+    def __init__(self, data=None, *args, instance=None, **kwargs):
+        if instance is not None and instance.pk:
+            data = keep_absent(data, instance, self.FIELDS)
+        else:
+            data = keep_absent(data, PurchaseLot(type=PurchaseLot.Type.COLLECTION, paid_by=PurchaseLot.PaidBy.CASH,
+                                                 status=PurchaseLot.Status.IN_POST), ["type", "paid_by", "status"])
+        super().__init__(data, *args, instance=instance, **kwargs)
+
+    def clean_price_paid(self):
+        value = self.cleaned_data.get("price_paid")
+        return Decimal("0") if value is None else value
+
+    def clean_bought_on(self):
+        from django.utils import timezone
+
+        return self.cleaned_data.get("bought_on") or timezone.localdate()
+
+
+ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+PDF_SIGNATURE = b"%PDF"
+IMAGE_SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+
+
+class AttachmentForm(forms.Form):
+    file = forms.FileField(help_text="PDF or image (PNG, JPEG, GIF, WebP), at most 10 MB")
+
+    def clean_file(self):
+        file = self.cleaned_data["file"]
+        if file.size > ATTACHMENT_MAX_BYTES:
+            raise forms.ValidationError("The file must be at most 10 MB.")
+        head = file.read(16)
+        file.seek(0)
+        if not (head.startswith(PDF_SIGNATURE) or any(head.startswith(sig) for sig in IMAGE_SIGNATURES)
+                or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")):
+            raise forms.ValidationError("Upload a PDF or an image (PNG, JPEG, GIF or WebP).")
+        return file
+
+
+class MarketsForm(forms.Form):
+    markets = forms.MultipleChoiceField(choices=Market.choices, help_text="The markets to list on")
+
+
+def clean_view_query(value):
+    """A collection query string without page (and without a leading "?")."""
+    from urllib.parse import parse_qsl, urlencode
+
+    value = (value or "").strip().lstrip("?")
+    pairs = [(k, v) for k, v in parse_qsl(value, keep_blank_values=False) if k not in ("page", "game")]
+    return urlencode(pairs)
+
+
+class SavedViewForm(forms.ModelForm):
+    """A saved collection view; a field left out keeps its value."""
+
+    FIELDS = ["name", "query"]
+
+    position = forms.IntegerField(min_value=1, required=False, help_text="1-based order; absent: last (on create) "
+                                                                         "or unchanged")
+
+    class Meta:
+        model = SavedView
+        fields = ["name", "query"]
+
+    def __init__(self, data=None, *args, instance=None, **kwargs):
+        if instance is not None and instance.pk:
+            data = keep_absent(data, instance, self.FIELDS)
+        super().__init__(data, *args, instance=instance, **kwargs)
+
+    def clean_name(self):
+        name = self.cleaned_data["name"].strip()
+        if not name:
+            raise forms.ValidationError("This field is required.")
+        return name
+
+    def clean_query(self):
+        return clean_view_query(self.cleaned_data.get("query"))
+
+
+class LocationForm(forms.ModelForm):
+    """A storage location; a field left out keeps its value. The code is unique per user."""
+
+    FIELDS = ["code", "capacity", "note"]
+
+    class Meta:
+        model = Location
+        fields = ["code", "capacity", "note"]
+
+    def __init__(self, data=None, *args, instance=None, **kwargs):
+        if instance is not None and instance.pk:
+            data = keep_absent(data, instance, self.FIELDS)
+        super().__init__(data, *args, instance=instance, **kwargs)
+
+    def clean_code(self):
+        code = self.cleaned_data["code"].strip()
+        if not code:
+            raise forms.ValidationError("This field is required.")
+        clash = Location.objects.owned_by(self.instance.user).filter(code=code).exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise forms.ValidationError(f"You already have a location {code}.")
+        return code

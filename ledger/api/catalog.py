@@ -8,13 +8,17 @@ from django import forms
 from django.contrib.postgres.search import TrigramSimilarity
 from django.db.models import F, Max, Q, Sum
 from django.db.models.functions import Coalesce
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .. import cardmarket
+from .. import cardmarket, snapshots
 from ..catalog import normalize_number
-from ..models import Blueprint, CardmarketPrice, Category, CollectionItem, MissingCardReport, Order, OrderItem
+from ..models import (Blueprint, CardmarketPrice, Category, CollectionItem, MissingCardReport, Order, OrderItem,
+                      PriceSnapshot)
 from ..search import SearchText, normalize_all, search_blueprints
 from .common import GAME, PAGE, doc, form_body, form_errors, game_param, messages_response, msg, page_payload, query
 
@@ -22,6 +26,8 @@ TAGS = ["catalog"]
 PRICE_FIELDS = ("trend", "low", "avg", "trend_foil", "low_foil", "avg_foil")
 ORDERINGS = ["trend", "-trend", "name", "year"]
 SOLD_DAYS = 30
+CHANGE_DAYS = 30
+HISTORY_DAYS = 90
 NOT_SOLD = [Order.State.CANCELED, Order.State.CLOSED]  # as the overview's revenue
 # Minimum pg_trgm similarity of q to a product name for "Did you mean".
 SUGGESTION_THRESHOLD = 0.3
@@ -77,7 +83,9 @@ def _category(value):
            "name (case, accents and punctuation ignored), set codes and, when it names a set, collector numbers; "
            "results come most relevant first. With no filter (searched: false) it lists the latest releases: the "
            "products of the newest expansions first. rarities lists the game's rarities; a search with no results "
-           "gives a close product name as suggestion (null when none)", parameters=[
+           "gives a close product name as suggestion (null when none). change_30d: the signed % change of the "
+           "Cardmarket trend over the last 30 days (\"+12.5\"; the foil trend with finish=foil; null without a price "
+           "30 days ago, from the daily price snapshots)", parameters=[
     query("q", "Words of the name in any order, set codes and, with a set code, collector numbers"),
     query("set", "Exact set code"),
     query("number", "Collector number"),
@@ -138,6 +146,13 @@ def catalog(request):
         printings = printings.order_by(*_ordering(ordering))
     sold = _sold(request.user, game)
     locations = _locations(request.user, game)
+    then = {}
+
+    def change_30d(bp):
+        price, old = bp.cm_product, then.get(bp.cm_product_id)
+        if price is None or old is None:
+            return None
+        return snapshots.change_pct(price.trend_foil if finish else price.trend, old[1] if finish else old[0])
 
     def printing(bp):
         price = bp.cm_product
@@ -160,9 +175,13 @@ def catalog(request):
             "sold_30d": sold.get(bp.cm_product_id, 0),
             "owned_locations": locations.get(bp.cm_product_id, []),
             "prices": None if price is None else {f: _money(getattr(price, f)) for f in PRICE_FIELDS},
+            "change_30d": change_30d(bp),
         }
 
-    page = page_payload(request, printings, printing)
+    page = page_payload(request, printings, lambda bp: bp)
+    then.update(snapshots.trends_on([bp.cm_product_id for bp in page["results"]],
+                                    timezone.localdate() - timedelta(days=CHANGE_DAYS)))
+    page["results"] = [printing(bp) for bp in page["results"]]
     return Response({
         "searched": searched,
         "filters": filters,
@@ -173,6 +192,33 @@ def catalog(request):
                          .values_list("rarity", flat=True).distinct().order_by("rarity")),
         "suggestion": _suggestion(game, q) if q and not page["count"] else None,
     })
+
+
+def _days(value, default, top):
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(days, 1), top)
+
+
+@doc(TAGS, "The Cardmarket trend history of a catalog product (its Cardmarket id, ct_id in the catalog rows) over "
+           "the last ?days (default 90, at most 400), oldest first: one point per day the trend or foil trend "
+           "changed, the first point dated the window's start with the value it had then (when known)", parameters=[
+    OpenApiParameter("days", OpenApiTypes.INT, OpenApiParameter.QUERY, description="Days back (1-400, default 90)"),
+])
+@api_view(["GET"])
+def history(request, ct_id):
+    get_object_or_404(Blueprint, cm_product_id=ct_id)
+    days = _days(request.query_params.get("days"), HISTORY_DAYS, PriceSnapshot.KEEP_DAYS)
+    start = timezone.localdate() - timedelta(days=days)
+    rows = list(PriceSnapshot.objects.filter(cm_product_id=ct_id, date__gte=start).order_by("date"))
+    points = [{"date": r.date, "trend": _money(r.trend), "trend_foil": _money(r.trend_foil)} for r in rows]
+    if not rows or rows[0].date > start:
+        before = snapshots.trends_on([ct_id], start).get(ct_id)
+        if before is not None:
+            points.insert(0, {"date": start, "trend": _money(before[0]), "trend_foil": _money(before[1])})
+    return Response({"points": points})
 
 
 def _ordering(ordering):

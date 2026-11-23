@@ -156,6 +156,8 @@ class CollectionItem(models.Model):
         max_digits=10, decimal_places=2, null=True, blank=True, help_text="Purchase price of one copy",
     )
     location = models.CharField(max_length=40, blank=True, help_text='Storage location, e.g. "A3·12"')
+    lot = models.ForeignKey("PurchaseLot", null=True, blank=True, on_delete=models.SET_NULL, related_name="items",
+                            help_text="The purchase lot the copies came from")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -649,6 +651,8 @@ class ScanSession(models.Model):
     expansion = models.ForeignKey(Expansion, null=True, blank=True, on_delete=models.SET_NULL)
     default_condition = models.CharField(max_length=2, choices=Condition.choices, default=Condition.NEAR_MINT)
     default_language = models.CharField(max_length=3, choices=Language.choices, default=Language.EN)
+    lot = models.ForeignKey("PurchaseLot", null=True, blank=True, on_delete=models.SET_NULL,
+                            related_name="scan_sessions", help_text="The items saved from the session get this lot")
     status = models.CharField(max_length=5, choices=Status.choices, default=Status.OPEN)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -891,3 +895,154 @@ class RepricingChange(models.Model):
 
     def __str__(self):
         return f"{self.name} {self.market}: {self.old_price} → {self.new_price}"
+
+
+class PurchaseLot(models.Model):
+    """Cards bought in one go (a collection, a buylist, a restock, a trade-in), numbered PL-0001, PL-0002, ... per
+    user; its items are the collection items whose lot it is (ledger/purchases.py computes its figures)."""
+
+    class Type(models.TextChoices):
+        COLLECTION = "collection", "Collection"
+        BUYLIST = "buylist", "Buylist"
+        RESTOCK = "restock", "Restock"
+        TRADE_IN = "trade_in", "Trade-in"
+
+    class PaidBy(models.TextChoices):
+        CASH = "cash", "Cash"
+        BANK_TRANSFER = "bank_transfer", "Bank transfer"
+        PAYPAL = "paypal", "PayPal"
+        CARD = "card", "Card"
+        STORE_CREDIT = "store_credit", "Store credit"
+        OTHER = "other", "Other"
+
+    class Status(models.TextChoices):
+        IN_POST = "in_post", "In the post"
+        RECEIVED = "received", "Received"
+        GRADING = "grading", "Grading"
+        LISTING = "listing", "Listing"
+        DONE = "done", "Done"
+
+    # Still to sort or grade (me's lots_to_process, the purchases' waiting KPIs and the "To grade" tab)
+    TO_PROCESS = (Status.IN_POST, Status.RECEIVED, Status.GRADING)
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="purchase_lots")
+    number = models.PositiveIntegerField(help_text="Per-user sequence (the code's number)")
+    code = models.CharField(max_length=20, help_text='"PL-0001"')
+    type = models.CharField(max_length=10, choices=Type.choices, default=Type.COLLECTION)
+    seller = models.CharField(max_length=200, blank=True)
+    where = models.CharField(max_length=200, blank=True, help_text="Where it was bought (a shop, a fair, online)")
+    cards_estimate = models.PositiveIntegerField(null=True, blank=True, help_text="Cards expected, before sorting")
+    price_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    paid_by = models.CharField(max_length=13, choices=PaidBy.choices, default=PaidBy.CASH)
+    bought_on = models.DateField()
+    next_step = models.TextField(blank=True)
+    status = models.CharField(max_length=8, choices=Status.choices, default=Status.IN_POST)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["-bought_on", "-number"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "number"], name="unique_purchase_lot_number"),
+            models.UniqueConstraint(fields=["user", "code"], name="unique_purchase_lot_code"),
+        ]
+
+    def __str__(self):
+        return self.code
+
+
+class PurchaseAttachment(models.Model):
+    """A receipt or photo of a purchase lot (PDF or image) in the default storage, served under /media/."""
+
+    lot = models.ForeignKey(PurchaseLot, on_delete=models.CASCADE, related_name="attachments")
+    file = models.FileField(upload_to="purchases/")
+    name = models.CharField(max_length=200, help_text="The uploaded file's name")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    objects = owned_manager("lot__user")
+
+    class Meta:
+        ordering = ["uploaded_at", "id"]
+
+    def __str__(self):
+        return self.name
+
+
+class PriceSnapshot(models.Model):
+    """The Cardmarket trend of a product on a day it changed (written by the catalog price import; a product's value
+    on any day is its latest snapshot on or before it). Rows older than KEEP_DAYS are pruned once a newer row also
+    predates the cutoff."""
+
+    KEEP_DAYS = 400
+
+    cm_product_id = models.PositiveIntegerField("Cardmarket product")
+    date = models.DateField()
+    trend = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    trend_foil = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    class Meta:
+        ordering = ["cm_product_id", "date"]
+        constraints = [models.UniqueConstraint(fields=["cm_product_id", "date"], name="unique_price_snapshot")]
+
+    def __str__(self):
+        return f"{self.cm_product_id} {self.date}: {self.trend}"
+
+
+class StockValueSnapshot(models.Model):
+    """The value (Cardmarket trend × copies) of a user's stock of a game on a day (ledger/snapshots.py)."""
+
+    KEEP_DAYS = 400
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="stock_values")
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="stock_values")
+    date = models.DateField()
+    value = models.DecimalField(max_digits=14, decimal_places=2)
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["-date"]
+        constraints = [models.UniqueConstraint(fields=["user", "game", "date"], name="unique_stock_value_snapshot")]
+
+    def __str__(self):
+        return f"{self.user} {self.game} {self.date}: {self.value}"
+
+
+class SavedView(models.Model):
+    """A collection filter the user saved (its query string, without page), shown as a tab."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="saved_views")
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="saved_views")
+    name = models.CharField(max_length=60)
+    query = models.CharField(max_length=500, blank=True, help_text='The collection query string, e.g. "view=bulk&set=DMU"')
+    position = models.PositiveIntegerField(default=1, help_text="1-based order among the user's views of the game")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["position", "id"]
+
+    def __str__(self):
+        return self.name
+
+
+class Location(models.Model):
+    """A storage location of the user's (a box, a binder page): its capacity in copies; the copies in it are the
+    items whose location equals its code."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="locations")
+    code = models.CharField(max_length=40, help_text='As written on the items, e.g. "A3·12"')
+    capacity = models.PositiveIntegerField(null=True, blank=True, help_text="Copies it holds; empty: no limit")
+    note = models.CharField(max_length=200, blank=True)
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["code"]
+        constraints = [models.UniqueConstraint(fields=["user", "code"], name="unique_location_code")]
+
+    def __str__(self):
+        return self.code

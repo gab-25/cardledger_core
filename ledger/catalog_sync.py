@@ -19,8 +19,9 @@ from itertools import batched
 from botocore.exceptions import BotoCoreError
 from cardledger_vision import Index
 from django.db import transaction
+from django.utils import timezone
 
-from . import cardmarket, catalog
+from . import cardmarket, catalog, snapshots
 from .cardmarket import PRICE_FIELDS, CardmarketError
 from .catalog_files import CatalogBucket, CatalogFileMissing, CatalogFilesError
 from .models import Blueprint, CardmarketPrice, Category, Expansion, Game, GameVisionIndex
@@ -217,6 +218,7 @@ def _sync_game(bucket, cm_client, game, problem=""):
             imported = file is not None
             pruned = _write(game, file, prices, guide_date)
             del file
+            snapshots.snapshot_prices(game, timezone.localdate(guide_date))
             blueprints = priced = 0
             for cm in Blueprint.objects.filter(expansion__game=game).values_list("cm_product_id", flat=True):
                 blueprints += 1
@@ -296,6 +298,11 @@ def run_sync(bucket=None, cm_client=None, report=log_report):
     finally:
         if own_cm:
             cm_client.close()
+    try:
+        snapshots.snapshot_stock_values()
+    except Exception as exc:  # the catalog is synced: a failed snapshot is only reported (the command reruns it)
+        logger.exception("Stock value snapshot failed")
+        report(f"Stock value snapshot failed: {type(exc).__name__}: {exc}", True)
     names = dict(Game.objects.values_list("slug", "name"))
     for result in results:
         warning = bool(result.error or result.reconciled.clashes or result.vision not in VISION_OK)

@@ -20,7 +20,7 @@ from rest_framework.response import Response
 
 from accounts.models import seller_settings_of
 
-from .. import repricer, services
+from .. import repricer, services, snapshots
 from ..cardmarket import blueprint_value, trend_price
 from ..forms import BulkForm, CatalogItemForm, CsvImportForm, ItemForm
 from ..models import Card, Category, CollectionItem, Condition, Language, Listing, Market, SyncLog
@@ -134,6 +134,7 @@ def _row(item):
         "listing_price": _listing_price(item),
         "listings": _listings(item),
         "added_at": item.created_at,
+        "lot": item.lot.code if item.lot_id else None,
     }
 
 
@@ -143,7 +144,7 @@ def _collection(request):
     game = game_param(params)
     views = _views()
     items = _with_blueprint(CollectionItem.objects.owned_by(user).filter(card__game=game)
-                            .select_related("card").prefetch_related("listings"))
+                            .select_related("card", "lot").prefetch_related("listings"))
     counts = {f"{name}_n": Count("pk", filter=views[name]) for name in ("below_trend", "not_listed", "stale")}
     stats = items.aggregate(total=Sum("quantity"), value=Sum(VALUE), cost_value=Sum(COST_VALUE), **counts)
     for name in ("below_trend", "not_listed", "stale"):
@@ -156,6 +157,7 @@ def _collection(request):
     )
     stats["value"] = _money(stats["value"])
     stats["cost_value"] = _money(stats["cost_value"])
+    stats["value_week_ago"] = _money(snapshots.value_week_ago(user, game))
 
     q = params.get("q", "").strip()
     foil = params.get("foil") == "1"
@@ -163,6 +165,7 @@ def _collection(request):
     cond = params.get("cond", "")
     category = _category(params.get("category"))
     location = params.get("location", "")
+    lot = params.get("lot", "").strip()
     view = params.get("view", "")
     if view not in VIEWS:
         view = "all"
@@ -179,6 +182,8 @@ def _collection(request):
         items = items.filter(category_ct_id=category)
     if location:
         items = items.filter(location=location)
+    if lot:
+        items = items.filter(lot__code__iexact=lot)
     # the views' counts honour the other filters, not ?view itself
     view_counts = items.aggregate(**{name: Count("pk", filter=views[name]) for name in VIEWS})
     if views[view] is not None:
@@ -196,13 +201,15 @@ def _collection(request):
         "sets": list(Card.objects.filter(items__owner=user).filter(game=game).values_list("set_code", flat=True)
                      .distinct().order_by("set_code")),
         "categories": [{"id": c.cm_id, "name": c.name} for c in categories],
-        "filtered": bool(q or foil or set_code or cond or category is not None or location or view != "all"),
+        "filtered": bool(q or foil or set_code or cond or category is not None or location or lot or view != "all"),
     })
 
 
-@doc(TAGS, "The collection (GET: ?q, foil, set, cond, category, location, view, page) or add a catalog product to it "
-           "(POST; with cost, location, and list_on: listings to publish of the copies added on those markets at "
-           "the price the repricing rules quote)", request=CATALOG_ITEM)
+@doc(TAGS, "The collection (GET: ?q, foil, set, cond, category, location, lot, view, page; rows carry their lot's "
+           "code; stats.value_week_ago: the stock value of the game a week ago, from the daily snapshots, null "
+           "without one 7 to 13 days old) or add a catalog product to it (POST; with cost, location, lot (a purchase "
+           "lot code), and list_on: listings to publish of the copies added on those markets at the price the "
+           "repricing rules quote)", request=CATALOG_ITEM)
 @extend_schema(methods=["GET"], parameters=[
     query("q", "Name or exact set code"),
     query("foil", "1: foils only", enum=["1"]),
@@ -210,6 +217,7 @@ def _collection(request):
     query("cond", "Condition", enum=Condition.values),
     query("category", "CardTrader category id of the item's catalog product"),
     query("location", "Exact storage location"),
+    query("lot", 'Code of a purchase lot ("PL-0001"): its items only'),
     query("view", "all (default); below_trend: active listing more than 5% under the trend; not_listed: no active "
                   f"listing; stale: added over {STALE_DAYS} days ago and still in stock; bulk: trend under 0.50",
           enum=VIEWS),
@@ -274,6 +282,7 @@ def item(request, pk):
         "has_listing": obj.listings.filter(pending_delete=False).exists(),
         "cost": _money(obj.cost),
         "location": obj.location,
+        "lot": obj.lot.code if obj.lot_id else None,
     })
 
 
