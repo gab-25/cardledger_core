@@ -30,6 +30,8 @@ BATCH = 2000
 # catalog: a truncated or emptied file must not wipe it.
 PRUNE_MIN_SHARE = 0.5
 
+VISION_OK = ("", "updated", "unchanged", "missing")  # any other GameResult.vision is an error text
+
 logger = logging.getLogger(__name__)
 
 
@@ -177,7 +179,9 @@ def _sync_vision(bucket, game):
     digest = hashlib.sha256(data).hexdigest()
     if GameVisionIndex.objects.filter(game=game).values_list("sha256", flat=True).first() == digest:
         return "unchanged"
-    Index.load(data)  # InvalidIndex when the bytes are not an index
+    index = Index.load(data)  # InvalidIndex when the bytes are not an index
+    if index.header.game != game.slug:
+        raise CatalogSyncError(f"index of game {index.header.game!r} in the file of {game.slug!r}")
     GameVisionIndex.objects.update_or_create(game=game, defaults={"data": data, "sha256": digest})
     return "updated"
 
@@ -294,7 +298,8 @@ def run_sync(bucket=None, cm_client=None, report=log_report):
             cm_client.close()
     names = dict(Game.objects.values_list("slug", "name"))
     for result in results:
-        report(_summary(names[result.game], result), bool(result.error or result.reconciled.clashes))
+        warning = bool(result.error or result.reconciled.clashes or result.vision not in VISION_OK)
+        report(_summary(names[result.game], result), warning)
     failed = [r.game for r in results if r.unexpected]
     if failed:
         raise CatalogSyncError(f"unexpected failure in: {', '.join(failed)}")

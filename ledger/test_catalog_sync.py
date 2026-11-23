@@ -448,6 +448,24 @@ class VisionIndexTest(CatalogSyncTestCase):
         self.assertEqual(results["pokemon"].vision, "updated")
         self.assertEqual(results["pokemon"].error, "")
 
+    def test_index_of_another_game_is_rejected(self):
+        data = vision_bytes()
+        self.files.vision["mtg"] = data
+        self.sync()
+        self.files.vision["mtg"] = vision_bytes("pokemon", name="Pikachu")
+        mtg = self.sync()["mtg"]
+        self.assertIn("pokemon", mtg.vision)
+        self.assertNotIn(mtg.vision, ("updated", "unchanged", "missing"))
+        self.assertEqual(bytes(GameVisionIndex.objects.get(game=game()).data), data)
+
+    def test_vision_error_is_a_warning_in_the_report(self):
+        self.reports = []
+        self.files.vision["mtg"] = b"junk"
+        self.run_sync()
+        message, warning = next((m, w) for m, w in self.reports if "vision index Invalid" in m)
+        self.assertIn("vision index Invalid", message)
+        self.assertTrue(warning)
+
     def test_vision_failure_does_not_fail_catalog(self):
         self.files.vision_denied.add("mtg")
         results = self.sync()
