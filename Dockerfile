@@ -9,22 +9,33 @@ RUN npm ci
 COPY ui/ ./
 RUN npm run build
 
-FROM python:3.14-slim
+# The Python dependencies, installed into /opt/venv. git is needed here only, for the git-sourced cardledger-vision
+# (uv.lock pins its commit), and stays out of the final image.
+FROM python:3.14-slim AS deps
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/uv
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1 \
+ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
-    UV_PROJECT_ENVIRONMENT=/opt/venv \
-    PATH="/opt/venv/bin:$PATH" \
-    DJANGO_DEBUG=false
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
+
+FROM python:3.14-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    DJANGO_DEBUG=false
+
+WORKDIR /app
+
+COPY --from=deps /opt/venv /opt/venv
 
 COPY --exclude=ui . .
 

@@ -18,4 +18,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-cardledger-vision = { url = "https://github.com/gab-25/cardledger_vision/archive/refs/tags/v0.1.0.tar.gz" }
+cardledger-vision = { git = "https://github.com/gab-25/cardledger_vision.git", tag = "v0.1.0" }
