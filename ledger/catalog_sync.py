@@ -17,11 +17,12 @@ from datetime import datetime
 from itertools import batched
 
 from botocore.exceptions import BotoCoreError
+from cardledger_vision import Index
 from django.db import transaction
 
 from . import cardmarket, catalog
 from .cardmarket import PRICE_FIELDS, CardmarketError
-from .catalog_files import CatalogBucket, CatalogFilesError
+from .catalog_files import CatalogBucket, CatalogFileMissing, CatalogFilesError
 from .models import Blueprint, CardmarketPrice, Category, Expansion, Game
 
 BATCH = 2000
@@ -48,6 +49,7 @@ class GameResult:
     guide_date: datetime | None
     error: str = ""  # with guide_date set: the catalog was not updated, the prices were
     unexpected: bool = False  # error is a bug or a database failure, not a file or Cardmarket problem
+    vision: str = ""  # the vision index: "updated", "unchanged", "missing" or what kept it from being stored
 
 
 def is_single_category(name):
@@ -165,6 +167,32 @@ def _game_file(bucket, game):
     return file
 
 
+def _sync_vision(bucket, game):
+    """Download game's vision index and store it when its bytes changed. A file that is missing or does not load
+    leaves the previous index as it was. Returns "updated", "unchanged" or "missing"; raises on anything else."""
+    try:
+        data = bucket.fetch_vision(game.slug)
+    except CatalogFileMissing:
+        return "missing"
+    digest = hashlib.sha256(data).hexdigest()
+    if game.vision_index is not None and game.vision_sha256 == digest:
+        return "unchanged"
+    Index.load(data)  # InvalidIndex when the bytes are not an index
+    game.vision_index = data
+    game.vision_sha256 = digest
+    game.save(update_fields=["vision_index", "vision_sha256"])
+    return "updated"
+
+
+def _vision_result(bucket, game):
+    """_sync_vision, a failure of which is told in its text and never reaches the catalog."""
+    try:
+        return _sync_vision(bucket, game)
+    except Exception as exc:
+        logger.warning("Vision index of %s not updated: %s: %s", game.slug, type(exc).__name__, exc)
+        return f"{type(exc).__name__}: {exc}"
+
+
 def _sync_game(bucket, cm_client, game, problem=""):
     """Import game's file when it changed and its prices, then align its cards. Everything is downloaded before
     anything is written, and written in one transaction. A file that cannot be read (or the problem that kept the
@@ -191,11 +219,15 @@ def _sync_game(bucket, cm_client, game, problem=""):
             for cm in Blueprint.objects.filter(expansion__game=game).values_list("cm_product_id", flat=True):
                 blueprints += 1
                 priced += cm in prices
-            return GameResult(
+            result = GameResult(
                 game=game.slug, imported=imported, expansions=Expansion.objects.filter(game=game).count(),
                 blueprints=blueprints, priced=priced, pruned=pruned, reconciled=catalog.reconcile_cards(game),
                 guide_date=guide_date, error=error,
             )
+        # After the catalog's transaction, so that a vision failure never rolls it back.
+        if bucket is not None:
+            result.vision = _vision_result(bucket, game)
+        return result
     except Exception as exc:
         # A bug or a database failure: this game is rolled back, the others still run.
         logger.exception("Catalog sync of %s failed", game.slug)
@@ -226,6 +258,8 @@ def _summary(name, result):
         message = f"{name} catalog: {result.expansions} expansions, {counts}"
         if not result.imported:
             message += ", file unchanged"
+    if result.vision and result.vision != "unchanged":
+        message += f", vision index {result.vision}"
     if result.pruned:
         message += f", {result.pruned} printings removed"
     if r.clashes:

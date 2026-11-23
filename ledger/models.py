@@ -66,6 +66,13 @@ class Game(models.Model):
         max_length=64, blank=True, help_text="sha256 of the catalog file last imported (the sync skips the same file)",
     )
 
+    vision_index = models.BinaryField(
+        null=True, blank=True, editable=False, help_text="the game's vision index file (cardledger_vision)",
+    )
+    vision_sha256 = models.CharField(
+        max_length=64, blank=True, help_text="sha256 of the vision index last stored (the sync skips the same file)",
+    )
+
     class Meta:
         ordering = ["name"]
 
