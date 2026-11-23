@@ -77,3 +77,43 @@ class MarketsMigrationTest(TransactionTestCase):
         # a second listing of the same item, on Cardmarket, is now possible
         Listing.objects.create(item_id=published.item_id, market="cm", price="9.00")
         self.assertEqual(Listing.objects.filter(item_id=published.item_id).count(), 2)
+
+
+class NoTokenMigrationTest(TransactionTestCase):
+    """0039 drops SyncService (and the CardTrader tokens with it), keeping its sync times on the CardTrader
+    connection."""
+
+    BEFORE = [("ledger", "0038_markets_cleanup"), AUTH]
+    AFTER = [("ledger", "0039_no_cardtrader_token"), AUTH]
+
+    def setUp(self):
+        self.executor = MigrationExecutor(connection)
+        self.executor.migrate(self.BEFORE)
+        self.apps = self.executor.loader.project_state(self.BEFORE).apps
+
+    def tearDown(self):
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+    def test_tokens_go_connections_stay(self):
+        get = self.apps.get_model
+        User = get("auth", "User")
+        gab, ami = User.objects.create(username="gab"), User.objects.create(username="ami")
+        now = timezone.now()
+        Service = get("ledger", "SyncService")
+        Service.objects.create(user=gab, name="CardTrader", api_token="tok", last_sync=now, orders_synced_at=now)
+        Service.objects.create(user=ami, name="CardTrader", api_token="tok2", last_sync=now)
+        Conn = get("ledger", "MarketConnection")
+        Conn.objects.create(user=gab, market="ct", status="ok")
+
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(self.AFTER)
+        apps = executor.loader.project_state(self.AFTER).apps
+
+        with self.assertRaises(LookupError):
+            apps.get_model("ledger", "SyncService")
+        conns = {c.user.username: c for c in apps.get_model("ledger", "MarketConnection").objects.select_related("user")}
+        self.assertEqual(set(conns), {"gab"})  # ami had no connection: CardTrader stays off for them
+        self.assertEqual((conns["gab"].status, conns["gab"].last_sync, conns["gab"].orders_synced_at), ("ok", now, now))

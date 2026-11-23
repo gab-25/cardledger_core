@@ -153,7 +153,7 @@ def catalog(request):
             "category_id": bp.category.cm_id if bp.category else None,
             "category_name": bp.category.name if bp.category else None,
             "is_product": bp.is_product,
-            "accepts_language": True,  # what CardTrader takes is checked when publishing
+            "accepts_language": True,  # what a market takes is checked by the extension when it publishes
             "owned_qty": owned_qty.get(bp.cm_product_id),
             "rarity": bp.rarity,
             "year": bp.expansion.released_at.year if bp.expansion.released_at else None,

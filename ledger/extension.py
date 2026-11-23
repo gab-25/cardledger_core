@@ -1,8 +1,9 @@
 """The browser extension: pairing and tokens, the plan of what to push to a market, and applying a run's report.
 
-The extension syncs both markets from the user's browser (Cardmarket through its seller pages, CardTrader through
-its API with the user's token); the server never calls a market for it. One run: GET plan → the extension applies
-it on the market and reads the stock and orders there → POST report (idempotent per run_id).
+The extension syncs both markets from the user's browser, in a logged-in tab of each (the seller area's stock
+export/import and orders pages; no market token is stored here); the server never calls a market. One run: GET plan
+→ the extension applies it on the market and reads the stock and orders there → POST report (idempotent per run_id).
+Shipping is done the same way: the extension marks the order shipped on its market, then POST shipped.
 """
 
 import hashlib
@@ -14,7 +15,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from . import services
-from .models import (CollectionItem, ExtensionPairing, ExtensionRun, ExtensionToken, Listing, Market,
+from .models import (Card, CollectionItem, ExtensionPairing, ExtensionRun, ExtensionToken, Listing, Market,
                      MarketConnection, Order, SyncLog)
 
 PAIRING_TTL = timedelta(minutes=10)
@@ -53,7 +54,7 @@ def normalize_code(code):
 
 def claim(code, name):
     """Exchange a valid pairing code for a new token: (raw token, user), or None when the code is unknown, expired
-    or already used. Pairing also turns Cardmarket on (never synced) for the user."""
+    or already used. Pairing also turns both markets on (never synced, unless synced before) for the user."""
     with transaction.atomic():
         pairing = (ExtensionPairing.objects.select_for_update().select_related("user")
                    .filter(code=normalize_code(code), claimed_at__isnull=True, expires_at__gt=timezone.now()).first())
@@ -63,10 +64,11 @@ def claim(code, name):
         pairing.save(update_fields=["claimed_at"])
         raw = secrets.token_urlsafe(32)
         ExtensionToken.objects.create(user=pairing.user, key=hash_key(raw), name=str(name or "")[:100])
-        conn = services.connection(pairing.user, Market.CARDMARKET)
-        if conn.status == MarketConnection.Status.OFF:
-            conn.status = MarketConnection.Status.NEVER if conn.last_sync is None else MarketConnection.Status.OK
-            conn.save(update_fields=["status"])
+        for market in Market.values:
+            conn = services.connection(pairing.user, market)
+            if conn.status == MarketConnection.Status.OFF:
+                conn.status = MarketConnection.Status.NEVER if conn.last_sync is None else MarketConnection.Status.OK
+                conn.save(update_fields=["status"])
     return raw, pairing.user
 
 
@@ -182,6 +184,20 @@ def _apply_result(listing, result, now):
     return False
 
 
+def _learn_blueprint(user, card, blueprint_id):
+    """Store blueprint_id (reported by a CardTrader run) as the card's CardTrader blueprint, unless another card
+    already has it (a warning in the user's log then). True when stored."""
+    if not blueprint_id or card.ct_blueprint_id == blueprint_id:
+        return False
+    if Card.objects.filter(ct_blueprint_id=blueprint_id).exclude(pk=card.pk).exists():
+        services._log(f"CardTrader: blueprint {blueprint_id} reported for {card} is already used by another card: "
+                      f"fix it by hand"[:300], SyncLog.Level.WARNING, owner=user)
+        return False
+    card.ct_blueprint_id = blueprint_id
+    card.save(update_fields=["ct_blueprint_id"])
+    return True
+
+
 def _suggest_item(user, row):
     """The user's collection item a market listing not known here probably is (same printing and copies), or None."""
     items = CollectionItem.objects.owned_by(user)
@@ -201,18 +217,19 @@ def _suggest_item(user, row):
 
 def _reconcile(user, market, stock):
     """Conflicts for the known listings that differ from the market's stock, and the stock rows not known here."""
-    known = set(Listing.objects.owned_by(user).filter(market=market).exclude(market_listing_id="")
-                .values_list("market_listing_id", flat=True))
+    known = {l.market_listing_id: l for l in Listing.objects.owned_by(user).filter(market=market)
+             .exclude(market_listing_id="").select_related("item__card")}
     remote, unmatched = {}, []
     for row in stock:
         listing_id = str(row.get("market_listing_id") or "")
         if listing_id in known:
             remote[listing_id] = (row.get("price"), row.get("quantity"))
+            if market == Market.CARDTRADER:
+                _learn_blueprint(user, known[listing_id].item.card, row.get("ct_blueprint_id"))
         else:
             unmatched.append({**row, "market_listing_id": listing_id, "price": _str_money(row.get("price")),
                               "item_id": _suggest_item(user, row)})
-    service = services.get_cardtrader(user) if market == Market.CARDTRADER else None
-    conflicts = services.diff_listings(user, market, remote, service=service)
+    conflicts = services.diff_listings(user, market, remote)
     return conflicts, unmatched
 
 
@@ -242,7 +259,8 @@ def _save_order(user, market, data):
 def apply_report(user, data):
     """Apply one run of the extension (validated report data) once: a retry with the same run_id answers the same.
 
-    Returns {applied, conflicts, orders_new, unmatched}.
+    Returns {applied, conflicts, orders_new, unmatched}. A CardTrader run's ct_blueprint_id (in a result, or in a
+    stock row of a known listing) is stored on the listing's card (_learn_blueprint).
     """
     market = data["market"]
     label = Market(market).label
@@ -264,6 +282,8 @@ def apply_report(user, data):
                 continue
             if not result.get("ok"):
                 failed.append((listing.item.card.name, result.get("error") or "unknown error"))
+            if market == Market.CARDTRADER:
+                _learn_blueprint(user, listing.item.card, result.get("ct_blueprint_id"))
             if _apply_result(listing, result, now):
                 applied += 1
 
@@ -283,12 +303,6 @@ def apply_report(user, data):
         if data.get("orders") is not None:
             conn.orders_synced_at = now
         conn.save(update_fields=["handle", "orders_synced_at"])
-        if market == Market.CARDTRADER:  # CardTrader's state (me, sync page) also follows its service
-            service = services.get_cardtrader(user)
-            service.last_sync = conn.last_sync
-            if data.get("orders") is not None:
-                service.orders_synced_at = now
-            service.save(update_fields=["last_sync", "orders_synced_at"])
 
         for name, reason in failed:
             services._log(f"{label}: {name} not synced ({reason})", SyncLog.Level.WARNING, owner=user)

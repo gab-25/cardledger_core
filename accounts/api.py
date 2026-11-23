@@ -1,5 +1,5 @@
 """The account API (/api/me/, /api/auth/, /api/account/): who is logged in, login/logout, password reset, profile,
-business details, seller settings, the CardTrader token and the activity (security) log.
+business details, seller settings and the activity (security) log.
 
 Authentication is the Django session; CSRF comes from the csrftoken cookie, sent back as X-CSRFToken.
 """
@@ -14,7 +14,7 @@ from django.utils.http import urlsafe_base64_decode
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from rest_framework import serializers, status
 from rest_framework.decorators import api_view, authentication_classes, parser_classes, permission_classes
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -22,12 +22,10 @@ from rest_framework.response import Response
 from ledger import services as ledger_services
 from ledger.api.common import (GAME, doc, form_body, form_errors, form_fields, game_param, messages_response,
                                msg)
-from ledger.cardtrader import CardTraderError
 from ledger.extension import extension_state
 from ledger.models import CardmarketPrice, CollectionItem, Listing, Order
 
-from .forms import (BusinessForm, BusinessProfileForm, CardTraderTokenForm, LoginForm, LogoForm, ProfileForm,
-                    SellerSettingsForm)
+from .forms import BusinessForm, BusinessProfileForm, LoginForm, LogoForm, ProfileForm, SellerSettingsForm
 from .models import AuditEvent, business_of, profile_of, record, seller_settings_of
 
 TAGS = ["account"]
@@ -52,8 +50,8 @@ def _user(user):
 @doc(TAGS, "The logged-in user, the sidebar counters (?game limits pending_changes, copies and live_listings to a "
            "game), the marketplaces' state (Cardmarket and CardTrader, with the seller handle), whether the browser "
            "extension is paired (and when it was last seen) and the date of the latest Cardmarket price guide. "
-           "CardTrader's status: off (no token), never (never synced), error (its latest log entry is a failed sync "
-           "or publish), ok; Cardmarket's: off until the extension is paired, then its connection's status",
+           "Each market's status is its connection's (both are synced by the extension): off until the extension is "
+           "paired, never (never synced), ok, error (the last sync failed)",
      parameters=[GAME])
 @api_view(["GET"])
 def me(request):
@@ -167,19 +165,10 @@ def logout_view(request):
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-@doc(TAGS, "Profile page data: the CardTrader connection")
+@doc(TAGS, "Profile page data: the password rules")
 @api_view(["GET"])
 def account(request):
-    user = request.user
-    cardtrader = ledger_services.get_cardtrader(user)
-    return Response({
-        "cardtrader": {
-            "name": cardtrader.name,
-            "last_sync": cardtrader.last_sync,
-            "token_saved": bool(cardtrader.api_token),
-        },
-        "password_help": password_validation.password_validators_help_texts(),
-    })
+    return Response({"password_help": password_validation.password_validators_help_texts()})
 
 
 @doc(TAGS, "Change first name, last name and email, and the business details (shop name, VAT number: left out, "
@@ -211,35 +200,6 @@ def password(request):
     update_session_auth_hash(request, form.user)  # stay logged in
     record(request.user, AuditEvent.Kind.PASSWORD_CHANGED, request)
     return messages_response(msg("success", "Password changed."))
-
-
-@doc(TAGS, "Show (GET), connect (PUT) or disconnect (DELETE) CardTrader with the user's own API token",
-     request=form_body("CardTraderToken", CardTraderTokenForm))
-@api_view(["GET", "PUT", "DELETE"])
-def cardtrader_token(request):
-    user = request.user
-    if request.method == "GET":
-        token = ledger_services.user_token(user)
-        if not token:
-            raise NotFound("No CardTrader token is saved.")
-        return Response({"token": token})
-    if request.method == "DELETE":
-        ledger_services.remove_api_token(user)
-        record(user, AuditEvent.Kind.TOKEN_REMOVED, request)
-        return messages_response(msg("success", "CardTrader token removed."))
-    form = CardTraderTokenForm(request.data)
-    if form.is_valid():
-        try:
-            info = ledger_services.set_api_token(user, form.cleaned_data["token"])
-        except CardTraderError as exc:
-            form.add_error("token", f"CardTrader rejected this token: {exc}")
-        except ledger_services.TokenInUse as exc:
-            form.add_error("token", str(exc))
-        else:
-            app = f" (app “{info['name']}”)" if info.get("name") else ""
-            record(user, AuditEvent.Kind.TOKEN_SAVED, request)
-            return messages_response(msg("success", f"CardTrader connected{app}."))
-    raise form_errors(form)
 
 
 def _business(user):
@@ -317,7 +277,7 @@ ACTIVITY_SIZE = 50
 
 
 @doc(TAGS, f"The account's security events, newest first (the last {ACTIVITY_SIZE}): sign-ins (ok and failed), "
-           "password changes and resets, CardTrader token saved or removed")
+           "password changes and resets (and the CardTrader token events of earlier versions)")
 @api_view(["GET"])
 def activity(request):
     events = AuditEvent.objects.filter(user=request.user)[:ACTIVITY_SIZE]

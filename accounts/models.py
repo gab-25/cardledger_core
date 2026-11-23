@@ -77,7 +77,8 @@ def seller_settings_of(user):
 
 
 class AuditEvent(models.Model):
-    """A security event of a user's account: sign-ins, password and marketplace token changes."""
+    """A security event of a user's account: sign-ins and password changes (TOKEN_* only on events of earlier versions,
+    when a CardTrader token was stored)."""
 
     class Kind(models.TextChoices):
         SIGN_IN = "sign_in", "Signed in"

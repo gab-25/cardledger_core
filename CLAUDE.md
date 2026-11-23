@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 CardLedger server: a Django 6 + Django REST Framework app (Python 3.14, managed with `uv`) that holds a trading card
-collection (Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages sales on Cardmarket and CardTrader (synced by a browser extension). It exposes
+collection (Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages sales on Cardmarket and CardTrader (synced only by a browser extension: no market token on the server). It exposes
 only a JSON API under `/api/`; the interface is a
 separate React SPA ([cardledger_ui](https://github.com/gab-25/cardledger_ui)), included as the git submodule `ui/`
 (pinned to a release tag; the Dockerfile builds it in a Node stage), whose built `index.html` Django serves for every
@@ -43,28 +43,26 @@ There is no linter or formatter configured. Settings come only from the environm
   `accounts.Profile`, one-to-one with the user and created on demand by `profile_of`, holds the business details
   `shop_name`/`vat_number`, shown in `me`'s `user` and saved by `PUT /api/account/profile/`),
   `ledger/` (the domain). Views in `ledger/api/*.py` and `accounts/api.py` are function-based DRF `@api_view`s, one
-  module per UI page; business logic lives in `ledger/services.py` (CardTrader sync, publish, orders, CSV) and
-  `ledger/scan.py`, not in the views.
+  module per UI page; business logic lives in `ledger/services.py` (CSV, market connections, orders, shared stock,
+  conflicts), `ledger/extension.py` and `ledger/scan.py`, not in the views.
 - **Multi-user ownership**: every personal row (collection items, listings, orders, scan sessions, conflicts, logs)
   has an owner, reached through `owned_manager(path)` / `OwnedQuerySet.owned_by(user)` in `ledger/models.py`. Views
   must always start from `Model.objects.owned_by(request.user)` so another user's object answers 404
   (`ledger/test_ownership.py`). `SyncLog.objects.visible_to(user)` adds the global entries. The card catalog
   (`Expansion`, `Blueprint`) and prices are shared.
-- **CardTrader tokens**: each user has their own token on a `SyncService` row (`services.get_cardtrader(user)`);
-  `services.user_client(user)` never falls back to another user's token, and nothing uses a shared or admin token:
-  CardTrader is only reached to sell (publish, orders, shipments). All clients are built by `services.make_client`,
-  which tests patch.
+- **No market tokens**: the server stores no Cardmarket or CardTrader credential and never calls either market (no
+  CardTrader client; `SyncService` and its tokens were dropped by migration 0039). Both markets are synced only by the
+  browser extension (see Markets).
 - **Cards vs printings**: `Card` is the Ledger's own row (name + set + collector number) that `CollectionItem`
   points to, tied to its printing by `Card.cm_product_id`; `Blueprint` is a product of the local catalog, keyed by
   its Cardmarket product id (`cm_product`, also the row of its Cardmarket price). **Games**: `Game` (mtg, pokemon,
   lorcana, onepiece, yugioh, riftbound); `Expansion`, `Category` and `Card` belong to a game, uniqueness is per game,
   and every catalog lookup (recognition, reconcile, resolve_blueprints, API) stays inside one game. Collection, import,
   export, listings, catalog and scan setup take `?game=<slug>` through `game_param(params)` / `GAME` in
-  `ledger/api/common.py` (default `mtg`, unknown slug 400); `GET /api/scan/sessions/`, `POST /api/listings/publish/` and `me`'s
+  `ledger/api/common.py` (default `mtg`, unknown slug 400); `GET /api/scan/sessions/` and `me`'s
   `pending_changes` without `game` (absent or blank) cover every game; item and listing detail (`collection/<pk>/`, `listings/<pk>/`) return their `game`;
   `GET /api/games/` lists the games. Orders, shipments, sync and `orders_to_ship` stay global. The catalog is rebuilt
-  only by the nightly `ledger/catalog_sync.py`, with no
-  CardTrader token: it imports the files of the separate generator repo gab-25/cardledger_database from a private
+  only by the nightly `ledger/catalog_sync.py`: it imports the files of the separate generator repo gab-25/cardledger_database from a private
   S3 bucket (`ledger/catalog_files.py`: one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest; the generator is run
   by hand, `cardledger-db generate` then `upload`; settings `CARDLEDGER_CATALOG_*`: bucket, endpoint, region, access
   key and secret; `AWS_*` is never read): each game's file is downloaded every night and imported only when the
@@ -73,19 +71,16 @@ There is no linter or formatter configured. Settings come only from the environm
   Cardmarket's product lists are not read by the app. `Category.is_single` tells cards from sealed products and
   accessories (`is_product`). After each sync `catalog.reconcile_cards` links, folds and rewrites cards to the
   catalog's set code and number, per game. Collection items are added only from the catalog
-  (`catalog.card_for_blueprint`); products are stored Near Mint, non-foil. When publishing,
-  `services.resolve_blueprints` finds the CardTrader blueprint with the seller's token (CardTrader's `card_market_ids`, then
-  number, then name) and what CardTrader takes for a product (its language is sent only if taken).
-  `services.ct_game_id(client, game)` finds CardTrader's game through `/games` and stores it in `Game.ct_game_id`;
-  expansions are matched per CardTrader game, and `ledger/ct_properties.py` derives the language and foil property
-  names per game from the blueprint's `editable_properties` (Magic's payload is unchanged); a non-Magic listing
-  CardTrader can't describe fails instead of being published. The catalog and
+  (`catalog.card_for_blueprint`); products are stored Near Mint, non-foil. `Card.ct_blueprint_id` (unique) is the
+  CardTrader blueprint, matched by the extension and stored when a CardTrader report gives it (`ct_blueprint_id` in a
+  result, or in a stock row of a known listing: `extension._learn_blueprint`; one already used by another card is
+  skipped with a warning in the user's log). The catalog and
   collection JSON keep the old field names (`ct_id`, `category_id`), now holding Cardmarket ids.
-- **Markets and the browser extension**: `Market` ("cm" Cardmarket, "ct" CardTrader). Both are synced by the
-  Chrome extension (separate repo cardledger_extension) from the user's browser, only when the user presses Sync;
-  the server never calls a market for it. The old CardTrader endpoints (`listings/publish/`, `sync/run/`,
-  `orders/import/`, `orders/<pk>/ship/`, single listing DELETE) still call CardTrader with the user's token, for
-  CardTrader rows only. `Listing` is one per (item, market) (`item.listings`, `item.listing_for(market)`,
+- **Markets and the browser extension**: `Market` ("cm" Cardmarket, "ct" CardTrader). Both are synced only by the
+  Chrome extension (separate repo cardledger_extension) from the user's browser, in a logged-in tab of each market
+  (seller area CSV export/import, orders pages), only when the user presses Sync; the server never calls a market.
+  There is no publish, sync, order import or ship endpoint: publishing is the plan/report cycle, orders arrive in
+  reports, shipping is `extension/shipped/` (both markets). `Listing` is one per (item, market) (`item.listings`, `item.listing_for(market)`,
   `active_listings()`; there is no `item.listing`): `market_listing_id` (CardTrader product id / Cardmarket article
   id; `Listing.ct_product_id` is a property over it), status to_publish|published|paused|error|sold, `error_message`,
   `listed_at`, and `pending_delete` (removed by the user while on its market: hidden everywhere, deleted there by the
@@ -94,19 +89,23 @@ There is no linter or formatter configured. Settings come only from the environm
   `OrderItem` has `market_item_id`/`market_listing_id`. `services.save_order` upserts any market's order and removes
   the sold copies once (`stock_applied`); **shared stock** (`services.share_stock`): the item's listings on the other
   markets are capped to its remaining copies, a published one goes back to to_publish, one left with no copies is
-  removed (pending_delete). `SyncConflict.market` (`service` is CardTrader's SyncService or null);
-  `services.diff_listings(user, market, remote)` serves both markets. `MarketConnection(user, market)`: handle,
-  status off|never|ok|error, last_sync, last_error, orders_synced_at (`services.connection`/`mark_synced`/
-  `mark_failed`); `services.market_states(user)` is `me`'s and the extension's `markets` (CardTrader keeps its old
-  token + log rule, Cardmarket is its connection: off until pairing). Data migrations 0036-0038 turned the existing
-  rows into market "ct" (`test_markets_migration.py`).
+  removed (pending_delete; `services.remove_listing` never deletes a listing still on its market, it flags it).
+  `SyncConflict.market`; `services.diff_listings(user, market, remote)` serves both markets. `MarketConnection(user,
+  market)`: handle, status off|never|ok|error, last_sync, last_error, orders_synced_at (`services.connection`/
+  `mark_synced`); `services.market_states(user)` is `me`'s, the extension's and the sync page's `markets`, both from
+  their connection only: off until pairing creates them, then the status the reports set. Data migrations 0036-0038
+  turned the existing rows into market "ct", 0039 dropped `SyncService` (tokens), `SyncConflict.service` and
+  `Game.ct_game_id` (`test_markets_migration.py`).
   Extension (`ledger/extension.py`, views `ledger/api/extension.py`, `/api/extension/`): pairing (`pair/` with the
   session → a 10-minute `ABCD-1234` code; `claim/` without session, rate-limited per IP in the cache → the raw token,
-  shown once; `ExtensionToken` keeps only its sha256; `tokens/` list and revoke). The other endpoints accept only
-  `Authorization: Token <token>` (`ExtensionTokenAuthentication`, used nowhere else): `status/`, `cardtrader-token/`,
-  `plan/?market=` (`action_of`: create/update for to_publish|error, delete for paused or pending_delete rows on the
+  shown once, and both markets' connections turned on; `ExtensionToken` keeps only its sha256; `tokens/` list and
+  revoke). The other endpoints accept only `Authorization: Token <token>` (`ExtensionTokenAuthentication`, used
+  nowhere else): `status/`, `plan/?market=` (`action_of`: create/update for to_publish|error, delete for paused or pending_delete rows on the
   market), `report/` (`apply_report`, idempotent per `ExtensionRun.run_id`: results, orders, stock reconciliation
-  with `unmatched` rows, connection, SyncLog), `shipped/`. `me` adds `extension: {paired, last_seen_at}`.
+  with `unmatched` rows, CardTrader blueprints, connection, SyncLog), `shipped/` (any market: tracking code, paid or
+  hub_pending → sent). `GET /api/sync/` `connections` are the two markets (`market_states` + `orders_synced_at`,
+  `open_conflicts`); `GET /api/orders/` `orders_synced_at` comes from the connections. `me` adds
+  `extension: {paired, last_seen_at}`.
 - **Dealer data**: `CollectionItem.cost` (purchase price per copy) and `location` (storage, e.g. "A3·12"), in the
   item API, the CSV columns and the order packing list (`orders/<pk>/` items carry `location`, sorted by it).
   `GET /api/collection/` rows add `trend` (= `price`), `cost`, `location`, `listing_price` (lowest active price, any market),
@@ -128,13 +127,12 @@ There is no linter or formatter configured. Settings come only from the environm
 - **Account extras** (`accounts/`): login takes the username or a unique email (case-insensitive), `remember`
   false ends the session with the browser; password reset by email (`templates/accounts/`, link to the SPA's
   `/login/reset/<uid>/<token>/`); `AuditEvent` (`record(user, kind, request)`: sign-in ok/failed on a known account,
-  password changed/reset, CardTrader token saved/removed; IP is `REMOTE_ADDR`) behind `GET /api/account/activity/`;
+  password changed/reset; `token_saved`/`token_removed` only on old rows; IP is `REMOTE_ADDR`) behind `GET /api/account/activity/`;
   `BusinessDetails` (`business_of`; shop name and VAT stay on `Profile`) with the logo in the default storage
   (`MEDIA_ROOT`, env `DJANGO_MEDIA_ROOT`, served by `config.views.media` under `/media/`; a compose volume).
-  `me` adds `counts.copies`/`live_listings` (per `?game`), `markets` (Cardmarket and CardTrader with `handle`, see
-  Markets; CardTrader: off without a token, never before any sync, error when the user's latest `CardTrader:` log
-  entry has `SyncLog.Level.ERROR`, written when a sync or publish raises, else ok), `extension` and
-  `prices_updated_at`. Price guide expressions for items (`trend_price`,
+  `me` adds `counts.copies`/`live_listings` (per `?game`), `markets` (Cardmarket and CardTrader with `handle`, from
+  their MarketConnection, see Markets), `extension` and `prices_updated_at`; `GET /api/account/` is only
+  `password_help`. Price guide expressions for items (`trend_price`,
   `item_guide_price`, foil-aware) live in `ledger/cardmarket.py`.
 - **Scan pipeline**: photo → `ledger/openrouter.py` (vision model reads the card) → `ledger/recognition.py` (matches
   it to a `Blueprint` of the local catalog) → `ledger/scan.py` (draft lines of a `ScanSession`, saved into the
@@ -157,8 +155,8 @@ There is no linter or formatter configured. Settings come only from the environm
 ## Tests
 
 Django's `TestCase` on PostgreSQL. Most ledger tests extend `LedgerTestCase` (`ledger/tests.py`): a superuser `gab`
-with demo data and a CardTrader token, a second user `ami`, and `FakeCardTrader` patched into `services.make_client`
-(no network). Tests also live in `ledger/test_*.py`, `accounts/tests.py` and `config/tests.py`. `SchemaTest` in
+with demo data (a synced CardTrader connection; `publish()` marks its to-publish listings published as an extension
+sync would) and a second user `ami`; nothing touches the network. Tests also live in `ledger/test_*.py`, `accounts/tests.py` and `config/tests.py`. `SchemaTest` in
 `ledger/test_scan_api.py` fails on any drf-spectacular warning.
 
 ## Conventions

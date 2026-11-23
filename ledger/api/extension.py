@@ -133,16 +133,6 @@ def status(request):
                      "pending": extension.pending_counts(request.user)})
 
 
-@doc(TAGS, "Extension: the user's saved CardTrader token (404 when there is none)")
-@extend_schema(operation_id="extension_cardtrader_token_retrieve")
-@token_view(["GET"])
-def cardtrader_token(request):
-    token = services.user_token(request.user)
-    if not token:
-        raise NotFound("No CardTrader token is saved.")
-    return Response({"token": token})
-
-
 def _market_param(value):
     if value not in Market.values:
         raise ValidationError({"market": ["One of cm, ct."]})
@@ -160,13 +150,17 @@ class ResultSerializer(serializers.Serializer):
     listing_id = serializers.IntegerField()
     ok = serializers.BooleanField()
     market_listing_id = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    ct_blueprint_id = serializers.IntegerField(required=False, allow_null=True, min_value=1,
+                                               help_text="CardTrader: the blueprint the listing was matched to "
+                                                         "(stored on its card)")
     error = serializers.CharField(required=False, allow_blank=True)
 
 
 class StockSerializer(serializers.Serializer):
     market_listing_id = serializers.CharField(max_length=64)
     cm_product_id = serializers.IntegerField(required=False, allow_null=True)
-    ct_blueprint_id = serializers.IntegerField(required=False, allow_null=True)
+    ct_blueprint_id = serializers.IntegerField(required=False, allow_null=True, min_value=1,
+                                               help_text="CardTrader: stored on the card of the known listing")
     name = serializers.CharField(allow_blank=True, default="")
     set_code = serializers.CharField(allow_blank=True, default="")
     collector_number = serializers.CharField(allow_blank=True, default="")
@@ -253,7 +247,9 @@ def report(request):
     return Response(extension.apply_report(request.user, serializer.validated_data))
 
 
-@doc(TAGS, "Extension: an order was marked as shipped on its market (404 when the user has no such order)",
+@doc(TAGS, "Extension: an order was marked as shipped on its market, Cardmarket or CardTrader (the only way an order "
+           "is shipped: the tracking code is saved, a paid or CT Zero pending order becomes sent; 404 when the user "
+           "has no such order)",
      request=body("ExtensionShipped", {
          "market": serializers.ChoiceField(choices=Market.choices),
          "market_order_id": serializers.CharField(),

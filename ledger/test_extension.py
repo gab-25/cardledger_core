@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from . import extension
-from .models import (CollectionItem, ExtensionPairing, ExtensionToken, Listing, MarketConnection, Order, SyncConflict,
+from .models import (Card, CollectionItem, ExtensionPairing, ExtensionToken, Listing, MarketConnection, Order, SyncConflict,
                      SyncLog)
 from .tests import LedgerTestCase
 
@@ -83,17 +83,22 @@ class PairingTest(ExtensionTestCase):
                          content_type="application/json")
         self.assertEqual(resp.status_code, 429)
 
-    def test_pairing_turns_cardmarket_on(self):
+    def test_pairing_turns_both_markets_on(self):
         me = self.client.get(reverse("accounts:api_me")).json()
         markets = {m["code"]: m for m in me["markets"]}
         self.assertEqual(set(markets), {"cm", "ct"})
         self.assertEqual((markets["cm"]["connected"], markets["cm"]["status"], markets["cm"]["handle"]),
                          (True, "never", ""))
+        self.assertEqual((markets["ct"]["connected"], markets["ct"]["status"]), (True, "ok"))  # synced before
         self.assertEqual(me["extension"]["paired"], True)
         self.client.force_login(self.other)
         me = self.client.get(reverse("accounts:api_me")).json()
         self.assertEqual({m["code"]: m["status"] for m in me["markets"]}, {"cm": "off", "ct": "off"})
         self.assertEqual(me["extension"], {"paired": False, "last_seen_at": None})
+        self.pair_and_claim()
+        me = self.client.get(reverse("accounts:api_me")).json()
+        self.assertEqual({m["code"]: (m["status"], m["connected"]) for m in me["markets"]},
+                         {"cm": ("never", True), "ct": ("never", True)})
 
     def test_tokens_list_and_revoke(self):
         data = self.client.get(reverse("ledger:api_extension_tokens")).json()
@@ -124,12 +129,8 @@ class TokenAuthTest(ExtensionTestCase):
         bad = Client(HTTP_AUTHORIZATION="Token nope")
         self.assertEqual(bad.get(reverse("ledger:api_extension_status")).status_code, 401)
 
-    def test_cardtrader_token(self):
-        self.assertEqual(self.ext.get(reverse("ledger:api_extension_cardtrader_token")).json(),
-                         {"token": "test-token"})
-        self.client.force_login(self.other)
-        other = Client(HTTP_AUTHORIZATION=f"Token {self.pair_and_claim()}")
-        self.assertEqual(other.get(reverse("ledger:api_extension_cardtrader_token")).status_code, 404)
+    def test_no_cardtrader_token_endpoint(self):
+        self.assertEqual(self.ext.get("/api/extension/cardtrader-token/").status_code, 404)
 
 
 class PlanTest(ExtensionTestCase):
@@ -266,6 +267,35 @@ class ReportTest(ExtensionTestCase):
         known.refresh_from_db()
         self.assertEqual(known.price, Decimal("27.00"))
 
+    def test_cardtrader_blueprints_are_stored_on_cards(self):
+        counterspell, ragavan = self.listing("Counterspell"), self.listing("Ragavan, Nimble Pilferer")
+        ragavan.market_listing_id = "88"
+        ragavan.save()
+        taken = Card.objects.create(game=counterspell.item.card.game, name="Other", set_code="XXX",
+                                    ct_blueprint_id=3003)
+        fable = self.listing("Fable of the Mirror-Breaker")
+        resp = self.report({"market": "ct", "results": [
+            {"listing_id": counterspell.pk, "ok": True, "market_listing_id": "555", "ct_blueprint_id": 1201},
+            {"listing_id": fable.pk, "ok": True, "market_listing_id": "556", "ct_blueprint_id": 3003},
+        ], "stock": [
+            {"market_listing_id": "555", "ct_blueprint_id": 1201, "quantity": 4, "price": "0.80"},
+            {"market_listing_id": "556", "quantity": 2, "price": "19.20"},
+            {"market_listing_id": "88", "ct_blueprint_id": 1001, "quantity": 1, "price": "48.00"},
+            {"market_listing_id": "999", "ct_blueprint_id": 4004, "name": "Unknown", "quantity": 1, "price": "1.00"},
+        ]})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(Card.objects.get(pk=counterspell.item.card_id).ct_blueprint_id, 1201)
+        self.assertEqual(Card.objects.get(pk=ragavan.item.card_id).ct_blueprint_id, 1001)  # from the stock
+        self.assertIsNone(Card.objects.get(pk=fable.item.card_id).ct_blueprint_id)  # 3003 is another card's
+        self.assertEqual(Card.objects.get(pk=taken.pk).ct_blueprint_id, 3003)
+        self.assertFalse(Card.objects.filter(ct_blueprint_id=4004).exists())  # unmatched rows teach nothing
+        self.assertTrue(SyncLog.objects.filter(owner=self.user, message__contains="blueprint 3003").exists())
+        # a Cardmarket run never sets CardTrader blueprints
+        thoughtseize = self.cm_listing("Thoughtseize")
+        self.report({"market": "cm", "results": [{"listing_id": thoughtseize.pk, "ok": True,
+                                                  "market_listing_id": "A1", "ct_blueprint_id": 5005}]})
+        self.assertIsNone(Card.objects.get(pk=thoughtseize.item.card_id).ct_blueprint_id)
+
     def test_error_report_marks_the_market(self):
         self.report({"market": "ct", "error": "CardTrader said 401", "handle": "gabshop"})
         ct = {m["code"]: m for m in self.client.get(reverse("accounts:api_me")).json()["markets"]}["ct"]
@@ -290,15 +320,32 @@ class ShippedTest(ExtensionTestCase):
         self.assertEqual(resp.json(), {"id": order.pk, "state": "sent", "tracking_code": "RR1"})
         order.refresh_from_db()
         self.assertIsNotNone(order.sent_at)
-        # another user's order is not found, and the CardTrader ship endpoint refuses Cardmarket orders
+        # another user's order is not found
         Order.objects.create(owner=self.other, market="cm", market_order_id="56", code="56", state="paid")
         self.assertEqual(self.ext.post(reverse("ledger:api_extension_shipped"),
                                        {"market": "cm", "market_order_id": "56"},
                                        content_type="application/json").status_code, 404)
-        paid = Order.objects.create(owner=self.user, market="cm", market_order_id="57", code="57", state="paid")
-        resp = self.client.post(reverse("ledger:api_order_ship", args=[paid.pk]), {"tracking_code": ""},
-                                content_type="application/json")
-        self.assertEqual(resp.status_code, 409)
+
+    def test_marks_cardtrader_orders_shipped(self):
+        paid = Order.objects.owned_by(self.user).filter(market="ct", state="paid").first()
+        ct0 = Order.objects.owned_by(self.user).get(market="ct", state="hub_pending")
+        for order, tracking in ((paid, "RR9IT"), (ct0, "")):
+            with self.subTest(state=order.state):
+                resp = self.ext.post(reverse("ledger:api_extension_shipped"),
+                                     {"market": "ct", "market_order_id": order.market_order_id,
+                                      "tracking_code": tracking}, content_type="application/json")
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertEqual(resp.json()["state"], "sent")
+                order.refresh_from_db()
+                self.assertEqual(order.state, "sent")
+                self.assertIsNotNone(order.sent_at)
+        self.assertEqual(paid.tracking_code, "RR9IT")
+        self.assertTrue(SyncLog.objects.filter(owner=self.user, message=f"CardTrader: order #{paid.code} shipped")
+                        .exists())
+        # the same id on the other market is not this order
+        self.assertEqual(self.ext.post(reverse("ledger:api_extension_shipped"),
+                                       {"market": "cm", "market_order_id": paid.market_order_id},
+                                       content_type="application/json").status_code, 404)
 
 
 class MarketSaleApiTest(ExtensionTestCase):

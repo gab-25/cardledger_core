@@ -56,20 +56,19 @@ MAGIC = "mtg"
 
 
 class Market(models.TextChoices):
-    """A marketplace CardLedger sells on; both are synced by the browser extension (CardTrader also by the server's
-    legacy publish/import endpoints)."""
+    """A marketplace CardLedger sells on; both are synced only by the browser extension (the server never calls
+    them)."""
 
     CARDMARKET = "cm", "Cardmarket"
     CARDTRADER = "ct", "CardTrader"
 
 
 class Game(models.Model):
-    """A trading card game of the catalog (Magic, Pokémon, ...): its Cardmarket and CardTrader ids."""
+    """A trading card game of the catalog (Magic, Pokémon, ...) and its Cardmarket id."""
 
     slug = models.SlugField(unique=True)
     name = models.CharField(max_length=100)
     cm_id = models.PositiveIntegerField("Cardmarket game", unique=True, help_text="Cardmarket's idGame")
-    ct_game_id = models.PositiveIntegerField("CardTrader game", null=True, blank=True)
     catalog_sha256 = models.CharField(
         max_length=64, blank=True, help_text="sha256 of the catalog file last imported (the sync skips the same file)",
     )
@@ -110,7 +109,8 @@ class Card(models.Model):
         help_text="Its printing in the catalog (Blueprint); the catalog sync keeps one card per product",
     )
     ct_blueprint_id = models.PositiveIntegerField(
-        "CardTrader blueprint", null=True, blank=True, help_text="Matched automatically on first publish"
+        "CardTrader blueprint", null=True, blank=True,
+        help_text="Reported by the extension's CardTrader sync (results or stock of a known listing)"
     )
     is_product = models.BooleanField(
         default=False, help_text="A sealed product or accessory (no condition or foil), not a card"
@@ -239,33 +239,11 @@ class Listing(models.Model):
         self.market_listing_id = "" if value is None else str(value)
 
 
-class SyncService(models.Model):
-    """A user's connection to a service (CardTrader): their own API token and sync times."""
-
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="sync_services")
-    name = models.CharField(max_length=80)
-    description = models.CharField(max_length=200, blank=True)
-    direction = models.CharField(max_length=120, blank=True)
-    api_token = models.TextField(blank=True)  # CardTrader tokens are long JWTs
-    ct_user_id = models.PositiveBigIntegerField(
-        "CardTrader user", null=True, blank=True, unique=True,
-        help_text="The CardTrader account behind the token: one app user per account",
-    )
-    last_sync = models.DateTimeField(null=True, blank=True)
-    orders_synced_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=["user", "name"], name="unique_service_per_user")]
-
-    def __str__(self):
-        return self.name
-
-
 class MarketConnection(models.Model):
     """A user's state on one market: whether it is connected, their seller name there and the last sync.
 
-    status: off (disconnected), never (connected, never synced), ok, error (the last sync or publish failed,
-    last_error). CardTrader's row follows the saved token (services.set_api_token / remove_api_token).
+    status: off (disconnected), never (connected, never synced), ok, error (the last sync failed, last_error). Both
+    markets' rows are created (never) when the extension is paired and updated by its reports.
     """
 
     class Status(models.TextChoices):
@@ -303,9 +281,6 @@ class SyncConflict(models.Model):
         LEDGER = "ledger", "Kept Ledger"
         REMOTE = "remote", "Kept remote"
 
-    service = models.ForeignKey(  # CardTrader's SyncService; None for the other markets' conflicts
-        SyncService, on_delete=models.CASCADE, null=True, blank=True, related_name="conflicts",
-    )
     market = models.CharField(max_length=2, choices=Market.choices, default=Market.CARDTRADER)
     item = models.ForeignKey(CollectionItem, on_delete=models.CASCADE, related_name="conflicts")
     field = models.CharField(max_length=40, blank=True, help_text="Listing field that differs, e.g. 'price'")
@@ -336,7 +311,7 @@ class SyncLog(models.Model):
     class Level(models.TextChoices):
         OK = "ok", "OK"
         WARNING = "warn", "Warning"
-        ERROR = "error", "Error"  # a sync or publish that failed (CardTrader unreachable, token rejected, ...)
+        ERROR = "error", "Error"  # a sync that failed (reported by the extension)
 
     owner = models.ForeignKey(  # None: a global entry (the catalog sync)
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True, related_name="sync_logs",

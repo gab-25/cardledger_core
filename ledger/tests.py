@@ -1,9 +1,6 @@
-import json
 from datetime import date, timedelta
 from decimal import Decimal
-from unittest import mock
 
-import httpx
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -12,21 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from . import services
-from .cardtrader import CardTraderClient, CardTraderError, money
-from .models import MAGIC, Blueprint, Card, CardmarketPrice, CollectionItem, Game, Listing, Order, OrderItem, SyncConflict, SyncLog, SyncService
-
-
-LANGUAGE_PROP = {"name": "mtg_language", "type": "string", "default_value": "en", "possible_values": ["en", "it"]}
-SINGLE_PROPS = [
-    {"name": "condition", "type": "string", "default_value": "Near Mint", "possible_values": ["Near Mint", "Played"]},
-    LANGUAGE_PROP,
-    {"name": "mtg_foil", "type": "boolean", "default_value": "false", "possible_values": [True, False]},
-]
-POKEMON_PROPS = [
-    {"name": "condition", "type": "string", "default_value": "Near Mint", "possible_values": ["Near Mint", "Played"]},
-    {"name": "pokemon_language", "type": "string", "default_value": "en", "possible_values": ["en", "it"]},
-    {"name": "pokemon_reverse", "type": "boolean", "default_value": "false", "possible_values": [True, False]},
-]
+from .models import MAGIC, Blueprint, Card, CardmarketPrice, CollectionItem, Game, Listing, Order, OrderItem, SyncConflict, SyncLog
 
 
 def game(slug=MAGIC):
@@ -34,12 +17,12 @@ def game(slug=MAGIC):
     return Game.by_slug(slug)
 
 
-def cm_id(ct_id):
-    """The Cardmarket product id the test catalog gives to a FakeCardTrader blueprint."""
-    return ct_id + 500000
+def cm_id(n):
+    """The Cardmarket product id of test catalog entry n (n: the old CardTrader-style test numbers)."""
+    return n + 500000
 
 
-# The local test catalog (load_catalog): the printings of FakeCardTrader, keyed by Cardmarket product id.
+# The local test catalog (load_catalog), keyed by Cardmarket product id.
 CATALOG_EXPANSIONS = [  # code, name, release date
     ("mh2", "Modern Horizons 2", date(2021, 6, 18)),
     ("neo", "Kamigawa: Neon Dynasty", date(2022, 2, 18)),
@@ -80,167 +63,6 @@ def load_catalog():
         })
 
 
-class FakeCardTrader:
-    """In-memory stand-in for the CardTrader API, served through httpx.MockTransport."""
-
-    def __init__(self):
-        self.expansions = [
-            {"id": 10, "game_id": 1, "code": "mh2", "name": "Modern Horizons 2"},
-            {"id": 11, "game_id": 1, "code": "neo", "name": "Kamigawa: Neon Dynasty"},
-            {"id": 12, "game_id": 1, "code": "dmr", "name": "Dominaria Remastered"},
-            {"id": 13, "game_id": 1, "code": "dmu", "name": "Dominaria United"},
-            {"id": 99, "game_id": 5, "code": "mh2", "name": "Not MTG"},
-            {"id": 20, "game_id": 5, "code": "sv1", "name": "Scarlet & Violet"},
-        ]
-        self.games = [{"id": 1, "name": "Magic"}, {"id": 5, "name": "Pokemon", "display_name": "Pokémon"}]
-        self.blueprints = {
-            10: [{"id": 1001, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Ragavan, Nimble Pilferer", "version": None, "fixed_properties": {"collector_number": "138"}},
-                 {"id": 1002, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Solitude", "version": None, "fixed_properties": {"collector_number": "32"}},
-                 {"id": 1003, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Urza’s Saga", "version": None, "fixed_properties": {"collector_number": "259"}},
-                 {"id": 1004, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Endurance", "version": None, "fixed_properties": {"collector_number": "157"}}],
-            11: [{"id": 1101, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Fable of the Mirror-Breaker", "version": "showcase", "fixed_properties": {"collector_number": "356"}},
-                 {"id": 1100, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Fable of the Mirror-Breaker", "version": None, "fixed_properties": {"collector_number": "141"}}],
-            12: [{"id": 1201, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Counterspell", "version": None, "fixed_properties": {"collector_number": "045"}}],
-            13: [{"id": 1301, "category_id": 1, "editable_properties": SINGLE_PROPS, "name": "Sheoldred, the Apocalypse", "version": None, "fixed_properties": {"collector_number": "107"}},
-                 {"id": 1390, "category_id": 4, "editable_properties": [LANGUAGE_PROP],
-                  "name": "Dominaria United Draft Booster Box", "version": None, "fixed_properties": {}},
-                 {"id": 1391, "category_id": 40, "editable_properties": [],
-                  "name": "Dominaria United Playmat", "version": None, "fixed_properties": {}}],
-        }
-        for blueprints in self.blueprints.values():
-            for bp in blueprints:
-                bp["card_market_ids"] = [cm_id(bp["id"])]
-        self.blueprints[20] = [{"id": 2001, "category_id": 73, "editable_properties": POKEMON_PROPS, "name": "Pikachu",
-                                "fixed_properties": {"collector_number": "025"}, "card_market_ids": [700001]}]
-        self.categories = [
-            {"id": 1, "game_id": 1, "name": "Magic Single Card"},
-            {"id": 4, "game_id": 1, "name": "Booster Boxes"},
-            {"id": 40, "game_id": 1, "name": "Playmats"},
-        ]
-        self.products = {}
-        self.orders = []
-        self.next_product = 5000
-        self.jobs = {}
-        self.calls = []
-        self.call_params = []  # (path, query params) of every call
-        self.offers = {}  # blueprint id -> marketplace offers replacing the default ones
-        self.fail_blueprints = set()
-        self.fail_export = set()  # expansion ids whose /blueprints/export answers 500
-        self.fail_marketplace = False
-
-    def handler(self, request):
-        path = request.url.path.removeprefix("/api/v2")
-        method = request.method
-        self.calls.append((method, path))
-        self.call_params.append((path, dict(request.url.params)))
-        body = json.loads(request.content) if request.content else {}
-        params = dict(request.url.params)
-
-        if path == "/info":
-            return httpx.Response(200, json={"id": 1, "name": "ledger", "user_id": 77})
-        if path == "/games":
-            return httpx.Response(200, json={"array": self.games})
-        if path == "/expansions":
-            return httpx.Response(200, json=self.expansions)
-        if path == "/categories":
-            return httpx.Response(200, json=[c for c in self.categories if c["game_id"] == int(params["game_id"])])
-        if path == "/blueprints/export":
-            if int(params["expansion_id"]) in self.fail_export:
-                return httpx.Response(500, json={"error": "boom"})
-            return httpx.Response(200, json=self.blueprints.get(int(params["expansion_id"]), []))
-        if path == "/products/export":
-            return httpx.Response(200, json=list(self.products.values()))
-        if path in ("/products/bulk_create", "/products/bulk_update"):
-            results = []
-            for i, p in enumerate(body["products"]):
-                if p.get("blueprint_id") in self.fail_blueprints:
-                    results.append({"result": "error", "job_index": i, "errors": {"properties": ["invalid"]}})
-                    continue
-                pid = p.get("id") or self._new_id()
-                prod = self.products.setdefault(pid, {"id": pid, "blueprint_id": p.get("blueprint_id")})
-                prod.update(quantity=p["quantity"], price_cents=round(p["price"] * 100),
-                            properties_hash=p.get("properties", {}))
-                results.append({"result": "ok", "job_index": i, "product_id": pid})
-            uuid = f"job-{len(self.jobs)}"
-            self.jobs[uuid] = {"uuid": uuid, "state": "completed", "results": results}
-            return httpx.Response(200, json={"job": uuid})
-        if path.startswith("/jobs/"):
-            return httpx.Response(200, json=self.jobs[path.split("/")[-1]])
-        if path.startswith("/products/") and method == "DELETE":
-            pid = int(path.split("/")[-1])
-            if pid not in self.products:
-                return httpx.Response(404, json={"error_code": "not_found", "extra": {"message": "gone"}})
-            return httpx.Response(200, json={"result": "ok", "resource": self.products.pop(pid)})
-        if path == "/marketplace/products" and self.fail_marketplace:
-            return httpx.Response(500, json={"error_code": "boom"})
-        if path == "/marketplace/products" and "expansion_id" in params:
-            def offer(cents, user, cond, lang, foil):
-                return {"price": {"cents": cents, "currency": "EUR"}, "user": {"id": user},
-                        "properties_hash": {"condition": cond, "mtg_language": lang, "mtg_foil": foil}}
-            return httpx.Response(200, json={str(bp["id"]): [
-                offer(100, 77, "Near Mint", "it", False),  # our own offer: ignored
-                offer(300, 2, "Near Mint", "it", False),
-                offer(200, 3, "Slightly Played", "it", False),
-                offer(900, 4, "Near Mint", "en", True),
-                offer(500, 5, "Near Mint", "tlh", False),  # unknown language: skipped
-            ] for bp in self.blueprints.get(int(params["expansion_id"]), [])})
-        if path == "/marketplace/products" and int(params["blueprint_id"]) in self.offers:
-            bp = params["blueprint_id"]
-            return httpx.Response(200, json={bp: self.offers[int(bp)]})
-        if path == "/marketplace/products":
-            bp = params["blueprint_id"]
-            return httpx.Response(200, json={bp: [
-                {"price": {"cents": 100, "currency": "EUR"}, "user": {"id": 77},
-                 "properties_hash": {"condition": "Near Mint"}},  # our own offer: ignored
-                {"price": {"cents": 2240, "currency": "EUR"}, "user": {"id": 2},
-                 "properties_hash": {"condition": "Slightly Played"}},
-                {"price": {"cents": 2000, "currency": "EUR"}, "user": {"id": 3},
-                 "properties_hash": {"condition": "Played"}},
-            ]})
-        if path == "/orders":
-            page = int(params.get("page", 1))
-            return httpx.Response(200, json=self.orders if page == 1 else [])
-        if path.endswith("/tracking_code"):
-            oid = int(path.split("/")[2])
-            self._order(oid)["order_shipping_method"]["tracking_code"] = body["tracking_code"]
-            return httpx.Response(200, json={})
-        if path.endswith("/ship"):
-            order = self._order(int(path.split("/")[2]))
-            if order["state"] != "paid":
-                return httpx.Response(422, json={"error_code": "invalid_state", "extra": {"message": "not paid"}})
-            order.update(state="sent", sent_at="2026-11-08T10:00:00.000Z")
-            return httpx.Response(200, json=order)
-        return httpx.Response(404, json={"error_code": "not_found"})
-
-    def _new_id(self):
-        self.next_product += 1
-        return self.next_product
-
-    def _order(self, oid):
-        return next(o for o in self.orders if o["id"] == oid)
-
-    def client(self, *args, **kwargs):
-        return CardTraderClient("test-token", transport=httpx.MockTransport(self.handler), sleep=lambda s: None)
-
-
-def order_payload(oid, state, items, *, ct0=False, tracked=False):
-    return {
-        "id": oid, "code": f"code{oid}", "state": state, "via_cardtrader_zero": ct0, "size": sum(i[2] for i in items),
-        "buyer": {"username": "buyer1", "email": "b@example.com"},
-        "paid_at": "2026-11-07T09:00:00.000Z", "sent_at": None, "packing_number": 4,
-        "seller_total": {"cents": 1234, "currency": "EUR"},
-        "order_shipping_address": {"name": "Ada", "street": "Via Po 1", "zip": "10100", "city": "Torino",
-                                   "state_or_province": "TO", "country": "Italy", "country_code": "IT"},
-        "order_shipping_method": {"name": "Letter", "tracked": tracked, "tracking_code": None},
-        "order_items": [
-            {"id": oid * 10 + n, "product_id": pid, "name": name, "expansion": "MH2", "quantity": qty,
-             "seller_price": {"cents": 500, "currency": "EUR"},
-             "properties": {"condition": "Near Mint", "mtg_language": "en", "mtg_foil": False}}
-            for n, (pid, name, qty) in enumerate(items)
-        ],
-    }
-
-
 # name, set, cond, lang, qty, price, listing (status, price) or None
 CARDS = [
     ("Ragavan, Nimble Pilferer", "MH2", "NM", "EN", 1, "48.00", ("published", "48.00")),
@@ -256,7 +78,7 @@ CARDS = [
     ("Endurance", "MH2", "LP", "EN", 1, "11.00", ("sold", "11.00")),
 ]
 
-# name, field, Ledger value, CardTrader value, numeric CardTrader value
+# name, field, Ledger value, CardTrader value, numeric CardTrader value (CardTrader conflicts)
 CONFLICTS = [
     ("Sheoldred, the Apocalypse", "quantity", "2 for sale", "1 for sale", Decimal("1")),
     ("Counterspell", "price", "€0.80", "€0.70", Decimal("0.70")),
@@ -267,9 +89,7 @@ CONFLICTS = [
 def load_demo(owner):
     """Give owner the demo ledger (the collection shown in the design) shown in the design: collection, listings, conflicts, orders, log."""
     now = timezone.now()
-    service = services.get_cardtrader(owner)
-    service.last_sync = now - timedelta(days=1)
-    service.save()
+    services.mark_synced(owner, "ct", when=now - timedelta(days=1))
 
     items = {}
     for name, set_code, cond, lang, qty, _price, listing in CARDS:
@@ -289,7 +109,7 @@ def load_demo(owner):
 
     for name, field, local, remote, amount in CONFLICTS:
         SyncConflict.objects.get_or_create(
-            service=service, item=items[name], field=field,
+            item=items[name], field=field,
             defaults={"local_value": local, "remote_value": remote, "remote_amount": amount},
         )
 
@@ -333,15 +153,16 @@ class LedgerTestCase(TestCase):
         self.user = User.objects.create_superuser("gab", password="pw")  # the admin: owns the demo data
         self.other = User.objects.create_user("ami", password="pw")
         load_demo(self.user)
-        SyncService.objects.filter(user=self.user).update(api_token="test-token", ct_user_id=77)
         self.client.force_login(self.user)
-        self.ct = FakeCardTrader()
-        patcher = mock.patch.object(services, "make_client", side_effect=self.ct.client)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
-    def publish(self):
-        return self.client.post(reverse("ledger:api_publish"))
+    def publish(self, owner=None):
+        """What a CardTrader sync of the extension does with the owner's (default self.user) listings to publish:
+        each becomes published with a market id (5001, 5002, ... for those without one)."""
+        mine = Listing.objects.owned_by(owner or self.user).filter(status=Listing.Status.TO_PUBLISH)
+        for n, listing in enumerate(mine.order_by("pk"), start=5001):
+            listing.market_listing_id = listing.market_listing_id or str(n)
+            listing.status, listing.listed_at = Listing.Status.PUBLISHED, listing.listed_at or timezone.now()
+            listing.save()
 
 
 class PagesTest(LedgerTestCase):
@@ -704,179 +525,6 @@ class CollectionIsolationTest(LedgerTestCase):
         self.assertNotIn("Ragavan", csv_text)
 
 
-class ClientTest(TestCase):
-    def test_errors_are_wrapped(self):
-        def handler(request):
-            return httpx.Response(401, json={"error_code": "unauthorized", "extra": {"message": "bad token"}})
-        client = CardTraderClient("x", transport=httpx.MockTransport(handler))
-        with self.assertRaisesMessage(CardTraderError, "bad token"):
-            client.info()
-
-    def test_rate_limit(self):
-        client = CardTraderClient("x", transport=httpx.MockTransport(lambda r: httpx.Response(429, json={})))
-        with self.assertRaises(CardTraderError) as ctx:
-            client.expansions()
-        self.assertEqual(ctx.exception.status, 429)
-
-    def test_redirect_is_an_error(self):
-        # CardTrader answered every API call with an HTML 302 to its root: it must not read as an empty success.
-        def handler(request):
-            return httpx.Response(302, headers={"Location": "https://api.cardtrader.com/"}, text="<html>Found</html>")
-        client = CardTraderClient("x", transport=httpx.MockTransport(handler))
-        with self.assertRaises(CardTraderError) as ctx:
-            client.expansions()
-        self.assertEqual(ctx.exception.status, 302)
-
-    def test_non_json_success_is_an_error(self):
-        client = CardTraderClient("x", transport=httpx.MockTransport(lambda r: httpx.Response(200, text="<html/>")))
-        with self.assertRaises(CardTraderError):
-            client.expansions()
-
-    def test_bearer_header_and_failed_job(self):
-        seen = {}
-
-        def handler(request):
-            seen["auth"] = request.headers["Authorization"]
-            if request.url.path.endswith("bulk_create"):
-                return httpx.Response(200, json={"job": "u1"})
-            return httpx.Response(200, json={"uuid": "u1", "state": "unprocessable"})
-        client = CardTraderClient("tok", transport=httpx.MockTransport(handler), sleep=lambda s: None)
-        with self.assertRaises(CardTraderError):
-            client.bulk_create([{"blueprint_id": 1, "price": 1.0, "quantity": 1}])
-        self.assertEqual(seen["auth"], "Bearer tok")
-
-    def test_missing_token(self):
-        with self.assertRaises(CardTraderError):
-            CardTraderClient("")
-
-    def test_money(self):
-        self.assertEqual(money({"cents": 6258, "currency": "EUR"}), Decimal("62.58"))
-        self.assertEqual(money(5), Decimal("0.05"))
-        self.assertIsNone(money(None))
-
-
-class PublishTest(LedgerTestCase):
-    def test_publish_creates_products_with_blueprints(self):
-        self.publish()
-        self.assertFalse(Listing.objects.filter(status=Listing.Status.TO_PUBLISH).exists())
-        fable = Listing.objects.get(item__card__name="Fable of the Mirror-Breaker")
-        self.assertIsNotNone(fable.ct_product_id)
-        self.assertEqual(fable.item.card.ct_blueprint_id, 1100)  # base version, not showcase
-        product = self.ct.products[fable.ct_product_id]
-        self.assertEqual(product["price_cents"], 1920)
-        self.assertEqual(product["properties_hash"], {"condition": "Near Mint", "mtg_language": "jp"})
-        sheoldred = Listing.objects.get(item__card__name="Sheoldred, the Apocalypse")
-        self.assertEqual(self.ct.products[sheoldred.ct_product_id]["properties_hash"]["condition"], "Played")
-        self.assertTrue(SyncLog.objects.filter(message__contains="3 listings published").exists())
-
-    def test_publish_updates_existing_product(self):
-        self.publish()
-        listing = Listing.objects.get(item__card__name="Counterspell")
-        pid = listing.ct_product_id
-        resp = self.client.put(reverse("ledger:api_listing", args=[listing.item.pk]), {
-            "quantity": 2, "price": "0.95", "status": "published",
-        }, content_type="application/json")
-        self.assertEqual(resp.json()["messages"][0]["text"], "Listing for Counterspell saved.")
-        self.publish()
-        listing.refresh_from_db()
-        self.assertEqual(listing.ct_product_id, pid)
-        self.assertEqual(self.ct.products[pid]["price_cents"], 95)
-        self.assertEqual(self.ct.products[pid]["quantity"], 2)
-
-    def test_unmatched_and_rejected_listings_stay_pending(self):
-        card = Card.objects.get(name="Counterspell")
-        card.name = "Counterspel"  # typo: not in the catalog
-        card.save()
-        self.ct.fail_blueprints = {1301}
-        resp = self.publish()
-        self.assertEqual(
-            set(Listing.objects.filter(status=Listing.Status.TO_PUBLISH).values_list("item__card__name", flat=True)),
-            {"Counterspel", "Sheoldred, the Apocalypse"},
-        )
-        messages = resp.json()["messages"]
-        self.assertEqual(messages[0], {"level": "success", "text": "Published 1 listing to CardTrader."})
-        warnings = [m["text"] for m in messages if m["level"] == "warning"]
-        self.assertEqual(len(warnings), 2)
-        self.assertTrue(any(w.startswith("Counterspel: ") and "not found in the CardTrader catalog" in w
-                            for w in warnings))
-
-    def test_api_error_is_shown(self):
-        with mock.patch.object(services, "make_client", side_effect=CardTraderError("no token")):
-            resp = self.publish()
-        self.assertEqual(resp.status_code, 502)
-        self.assertEqual(resp.json(), {"detail": "Publish failed: no token", "code": "service_error"})
-
-    def test_delete_listing_removes_remote_product(self):
-        self.publish()
-        listing = Listing.objects.get(item__card__name="Counterspell")
-        pid = listing.ct_product_id
-        resp = self.client.delete(reverse("ledger:api_listing", args=[listing.item.pk]))
-        self.assertEqual(resp.json()["messages"], [{"level": "success", "text": "Listing removed."}])
-        self.assertNotIn(pid, self.ct.products)
-        self.assertFalse(Listing.objects.filter(pk=listing.pk).exists())
-
-    def test_delete_listing_error_keeps_it(self):
-        self.publish()
-        listing = Listing.objects.get(item__card__name="Counterspell")
-        with mock.patch.object(services, "remove_listing", side_effect=CardTraderError("down")):
-            resp = self.client.delete(reverse("ledger:api_listing", args=[listing.item.pk]))
-        self.assertEqual(resp.status_code, 502)
-        self.assertEqual(resp.json()["detail"], "Listing not removed: down")
-        self.assertTrue(Listing.objects.filter(pk=listing.pk).exists())
-
-
-class ProductSellingTest(LedgerTestCase):
-    """A booster box (takes a language) and a playmat (takes nothing) listed for sale."""
-
-    def setUp(self):
-        super().setUp()
-        load_dmu(self)
-        self.box = self.listed(cm_id(1390))
-        self.mat = self.listed(cm_id(1391))
-
-    def listed(self, blueprint):
-        item = CollectionItem.objects.get(pk=add(self, blueprint, quantity=2).json()["id"])
-        return Listing.objects.create(item=item, quantity=1, price=Decimal("90.00"))
-
-    def properties(self, listing):
-        listing.refresh_from_db()
-        return self.ct.products[listing.ct_product_id]["properties_hash"]
-
-    def test_publish_booster_box_payload(self):
-        self.publish()
-        self.assertEqual(self.properties(self.box), {"mtg_language": "en"})
-
-    def test_product_language_sent_only_if_cardtrader_takes_it(self):
-        CollectionItem.objects.filter(pk__in=[self.box.item_id, self.mat.item_id]).update(language="IT")
-        self.publish()
-        self.assertEqual(self.properties(self.box), {"mtg_language": "it"})
-        self.assertEqual(self.properties(self.mat), {})
-
-    def test_publish_unknown_expansion_fails_only_that_listing(self):
-        card = Card.objects.create(game=game(), name="Mystery", set_code="ZZZ", collector_number="1", cm_product_id=1)
-        item = CollectionItem.objects.create(owner=self.user, card=card, quantity=1)
-        mystery = Listing.objects.create(item=item, quantity=1, price=Decimal("1.00"))
-        resp = self.publish()
-        self.assertIn("card not found in the CardTrader catalog", json.dumps(resp.json()))
-        mystery.refresh_from_db()
-        self.box.refresh_from_db()
-        self.assertEqual((mystery.status, self.box.status), (Listing.Status.TO_PUBLISH, Listing.Status.PUBLISHED))
-
-    def test_publish_playmat_has_no_language(self):
-        self.publish()
-        self.assertEqual(self.properties(self.mat), {})
-        self.assertEqual(self.mat.status, Listing.Status.PUBLISHED)
-
-    def test_order_of_product_is_imported(self):
-        self.publish()
-        self.box.refresh_from_db()
-        self.ct.orders = [order_payload(5, "paid", [(self.box.ct_product_id, "Draft Booster Box", 1)])]
-        self.client.post(reverse("ledger:api_orders_import"))
-        self.box.refresh_from_db()
-        self.assertEqual(self.box.status, Listing.Status.SOLD)
-        self.assertEqual(self.box.item.quantity, 1)
-
-
 class SaleApiTest(LedgerTestCase):
     def listing(self, name="Counterspell"):
         return Listing.objects.select_related("item__card").get(item__card__name=name)
@@ -937,27 +585,6 @@ class SyncTest(LedgerTestCase):
         return self.client.post(reverse("ledger:api_resolve", args=[conflict.pk]), {"keep": keep},
                                 content_type="application/json")
 
-    def test_sync_detects_remote_differences(self):
-        SyncConflict.objects.all().delete()
-        self.publish()
-        counterspell = Listing.objects.get(item__card__name="Counterspell")
-        self.ct.products[counterspell.ct_product_id]["price_cents"] = 70
-        fable = Listing.objects.get(item__card__name="Fable of the Mirror-Breaker")
-        del self.ct.products[fable.ct_product_id]
-        resp = self.client.post(reverse("ledger:api_sync_run"))
-        self.assertEqual(resp.json()["messages"], [{"level": "success", "text": "Sync complete: 2 conflicts to resolve."}])
-        conflicts = {c.item.card.name: c for c in SyncConflict.objects.filter(resolution="open")}
-        self.assertEqual(set(conflicts), {"Counterspell", "Fable of the Mirror-Breaker"})
-        self.assertEqual(conflicts["Counterspell"].remote_amount, Decimal("0.70"))
-        # A second sync does not duplicate conflicts, and fixed ones disappear.
-        self.ct.products[counterspell.ct_product_id]["price_cents"] = 80
-        resp = self.client.post(reverse("ledger:api_sync_run"))
-        self.assertEqual(resp.json()["messages"][0]["text"], "Sync complete: 1 conflict to resolve.")
-        self.assertEqual(
-            list(SyncConflict.objects.filter(resolution="open").values_list("item__card__name", flat=True)),
-            ["Fable of the Mirror-Breaker"],
-        )
-
     def test_keep_remote_price(self):
         conflict = SyncConflict.objects.get(field="price")
         resp = self.resolve(conflict, "remote")
@@ -969,12 +596,12 @@ class SyncTest(LedgerTestCase):
     def test_keep_ledger_requeues(self):
         conflict = SyncConflict.objects.get(field="status")
         listing = conflict.item.listing_for()
-        listing.ct_product_id = 42
+        listing.market_listing_id = "42"
         listing.save()
         self.resolve(conflict, "ledger")
         listing.refresh_from_db()
         self.assertEqual(listing.status, Listing.Status.TO_PUBLISH)
-        self.assertIsNone(listing.ct_product_id)
+        self.assertEqual(listing.market_listing_id, "")
 
     def test_resolve_needs_a_choice(self):
         conflict = SyncConflict.objects.get(field="price")
@@ -984,24 +611,43 @@ class SyncTest(LedgerTestCase):
         conflict.refresh_from_db()
         self.assertEqual(conflict.resolution, "open")
 
-    def test_sync_failure(self):
-        with mock.patch.object(services, "sync_all", side_effect=CardTraderError("down")):
-            resp = self.client.post(reverse("ledger:api_sync_run"))
-        self.assertEqual((resp.status_code, resp.json()["detail"]), (502, "Sync failed: down"))
-
     def test_sync_page(self):
         data = self.client.get(reverse("ledger:api_sync")).json()
         self.assertEqual(len(data["conflicts"]), 3)
         self.assertEqual(set(data["conflicts"][0]), {"id", "name", "set_code", "condition", "language", "service",
                                                       "market", "local_value", "remote_value"})
         self.assertEqual(data["pending_changes"], 3)
-        [ct] = data["connections"]
-        self.assertEqual((ct["name"], ct["token_ok"], ct["open_conflicts"]), ("CardTrader", True, 3))
+        cm, ct = data["connections"]
+        self.assertEqual(set(ct), {"code", "name", "connected", "status", "last_sync", "handle", "orders_synced_at",
+                                   "open_conflicts"})
+        self.assertEqual((ct["code"], ct["name"], ct["status"], ct["open_conflicts"]), ("ct", "CardTrader", "ok", 3))
+        self.assertIsNotNone(ct["last_sync"])
+        self.assertEqual((cm["code"], cm["status"], cm["connected"], cm["open_conflicts"]), ("cm", "off", False, 0))
         self.assertLessEqual(len(data["log"]), 20)
         self.assertEqual(set(data["log"][0]), {"created_at", "level", "level_label", "message"})
         self.client.force_login(self.other)
-        [ct] = self.client.get(reverse("ledger:api_sync")).json()["connections"]
-        self.assertFalse(ct["token_ok"])
+        conns = self.client.get(reverse("ledger:api_sync")).json()["connections"]
+        self.assertEqual([(c["code"], c["status"], c["open_conflicts"]) for c in conns], [("cm", "off", 0), ("ct", "off", 0)])
+
+    def test_sync_actions_are_gone(self):
+        for path in ("/api/sync/run/", "/api/listings/publish/", "/api/orders/import/"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path).status_code, 404)
+
+
+def ct_order(owner, oid, state, lines, *, ct0=False, tracked=False):
+    """Save owner's CardTrader order oid as an extension report does; lines: (market listing id, name, quantity)."""
+    fields = {
+        "code": f"code{oid}", "state": state, "via_cardtrader_zero": ct0, "buyer_username": "buyer1",
+        "buyer_email": "b@example.com", "paid_at": timezone.now(), "packing_number": 4, "total": Decimal("12.34"),
+        "currency": "EUR", "ship_name": "Ada", "ship_street": "Via Po 1", "ship_zip": "10100", "ship_city": "Torino",
+        "ship_province": "TO", "ship_country": "Italy", "ship_country_code": "IT", "shipping_method": "Letter",
+        "tracked": tracked, "size": sum(q for _, _, q in lines),
+    }
+    items = [{"market_item_id": oid * 10 + n, "market_listing_id": lid, "name": name, "expansion": "MH2",
+              "quantity": qty, "price": Decimal("5.00"), "condition": "NM", "language": "EN"}
+             for n, (lid, name, qty) in enumerate(lines)]
+    return services.save_order(owner, "ct", oid, fields, items)[0]
 
 
 class ShipmentsTest(LedgerTestCase):
@@ -1010,22 +656,13 @@ class ShipmentsTest(LedgerTestCase):
         self.publish()
         self.ragavan = Listing.objects.get(item__card__name="Ragavan, Nimble Pilferer")
         self.sheoldred = Listing.objects.get(item__card__name="Sheoldred, the Apocalypse")
-        self.ragavan.ct_product_id = 777
+        self.ragavan.market_listing_id = "777"
         self.ragavan.save()
 
-    def import_orders(self):
-        return self.client.post(reverse("ledger:api_orders_import"))
-
-    def ship(self, order, tracking_code, save_tracking=False):
-        return self.client.post(reverse("ledger:api_order_ship", args=[order.pk]),
-                                {"tracking_code": tracking_code, "save_tracking": save_tracking},
-                                content_type="application/json")
-
-    def test_import_orders_decrements_stock_once(self):
-        self.ct.orders = [order_payload(1, "paid", [(self.sheoldred.ct_product_id, "Sheoldred", 1)])]
-        resp = self.import_orders()
-        self.assertEqual(resp.json()["messages"], [{"level": "success", "text": "Orders imported: 1 new, 0 updated."}])
-        self.import_orders()  # idempotent
+    def test_order_decrements_stock_once(self):
+        lines = [(self.sheoldred.market_listing_id, "Sheoldred", 1)]
+        ct_order(self.user, 1, "paid", lines)
+        ct_order(self.user, 1, "paid", lines)  # idempotent
         self.sheoldred.refresh_from_db()
         self.assertEqual(self.sheoldred.quantity, 1)
         self.assertEqual(self.sheoldred.item.quantity, 1)
@@ -1035,62 +672,25 @@ class ShipmentsTest(LedgerTestCase):
         self.assertEqual(order.address_lines, ["Ada", "Via Po 1", "10100 Torino TO", "Italy"])
 
     def test_sold_out_listing_becomes_sold(self):
-        self.ct.orders = [order_payload(2, "paid", [(777, "Ragavan", 1)])]
-        self.import_orders()
+        ct_order(self.user, 2, "paid", [("777", "Ragavan", 1)])
         self.ragavan.refresh_from_db()
         self.assertEqual(self.ragavan.status, Listing.Status.SOLD)
         self.assertIsNotNone(self.ragavan.sold_at)
 
     def test_ct_zero_rules(self):
         # hub_pending decrements; the weekly merged order (paid, via CT0) does not.
-        self.ct.orders = [
-            order_payload(3, "hub_pending", [(777, "Ragavan", 1)], ct0=True),
-            order_payload(4, "paid", [(777, "Ragavan", 1)], ct0=True),
-        ]
-        self.import_orders()
+        ct_order(self.user, 3, "hub_pending", [("777", "Ragavan", 1)], ct0=True)
+        ct_order(self.user, 4, "paid", [("777", "Ragavan", 1)], ct0=True)
         self.ragavan.refresh_from_db()
         self.assertEqual(self.ragavan.item.quantity, 0)
         self.assertTrue(Order.objects.get(market_order_id=3).stock_applied)
         self.assertFalse(Order.objects.get(market_order_id=4).stock_applied)
 
-    def test_ship_with_tracking(self):
-        self.ct.orders = [order_payload(5, "paid", [(777, "Ragavan", 1)], tracked=True)]
-        self.import_orders()
-        order = Order.objects.get(market_order_id=5)
-        resp = self.ship(order, "")
-        self.assertEqual(resp.status_code, 502)
-        self.assertIn("need a tracking code", resp.json()["detail"])
-        resp = self.ship(order, "RR1IT")
-        self.assertEqual(resp.json(), {"shipped": True, "messages": [
-            {"level": "success", "text": f"Order #{order.code} marked as shipped."}]})
-        order.refresh_from_db()
-        self.assertEqual(order.state, Order.State.SENT)
-        self.assertEqual(order.tracking_code, "RR1IT")
-        self.assertIsNotNone(order.sent_at)
-        self.assertIn(("PUT", "/orders/5/tracking_code"), self.ct.calls)
-
-    def test_cannot_ship_twice(self):
-        order = Order.objects.get(state="sent")
-        resp = self.ship(order, "X")
-        self.assertEqual(resp.status_code, 409)
-        self.assertEqual(resp.json(), {"detail": f"Order #{order.code} is shipped: it cannot be shipped.",
-                                       "code": "blocked"})
-
-    def test_save_tracking_only(self):
-        self.ct.orders = [order_payload(6, "paid", [(777, "Ragavan", 1)])]
-        self.import_orders()
-        order = Order.objects.get(market_order_id=6)
-        resp = self.ship(order, "RR2IT", save_tracking=True)
-        self.assertEqual(resp.json(), {"shipped": False, "messages": [
-            {"level": "success", "text": "Tracking code saved on CardTrader."}]})
-        order.refresh_from_db()
-        self.assertEqual((order.state, order.tracking_code), (Order.State.PAID, "RR2IT"))
-
-    def test_invalid_tracking_code(self):
+    def test_orders_are_shipped_only_by_the_extension(self):
         order = Order.objects.filter(state="paid").first()
-        resp = self.ship(order, "X" * 200)
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.json()["detail"], "Invalid tracking code.")
+        resp = self.client.post(f"/api/orders/{order.pk}/ship/", {"tracking_code": "X"},
+                                content_type="application/json")
+        self.assertEqual(resp.status_code, 404)
 
     def test_shipments_tabs(self):
         data = self.client.get(reverse("ledger:api_orders")).json()
@@ -1106,9 +706,7 @@ class ShipmentsTest(LedgerTestCase):
         self.assertEqual(self.client.get(reverse("ledger:api_orders"), {"tab": "nope"}).json()["tab"], "to_ship")
 
     def test_order_detail(self):
-        self.ct.orders = [order_payload(1, "paid", [(self.sheoldred.ct_product_id, "Sheoldred", 1)])]
-        self.import_orders()
-        order = Order.objects.get(market_order_id=1)
+        order = ct_order(self.user, 1, "paid", [(self.sheoldred.market_listing_id, "Sheoldred", 1)])
         data = self.client.get(reverse("ledger:api_order", args=[order.pk])).json()
         self.assertEqual(data["address_lines"], ["Ada", "Via Po 1", "10100 Torino TO", "Italy"])
         self.assertTrue(data["can_ship"])
@@ -1118,58 +716,21 @@ class ShipmentsTest(LedgerTestCase):
         self.assertEqual(data["total"], "12.34")
 
 
-CONNECT = "Connect your CardTrader token in Profile and settings to sell."
-
-
 class SellingIsolationTest(LedgerTestCase):
-    """self.user (the admin) sells with their own token; self.other is a friend."""
+    """self.user (the admin) has the demo data; self.other is a friend."""
 
-    def friend_listing(self, status=Listing.Status.TO_PUBLISH, ct_product_id=None, name="Lightning Bolt"):
-        card = Card.objects.create(game=game(), name=name, set_code="M10", ct_blueprint_id=1001 if name == "Lightning Bolt" else None)
+    def friend_listing(self, status=Listing.Status.TO_PUBLISH, market_listing_id="", name="Lightning Bolt"):
+        card = Card.objects.create(game=game(), name=name, set_code="M10")
         item = CollectionItem.objects.create(owner=self.other, card=card, quantity=2)
         return Listing.objects.create(item=item, quantity=1, price=Decimal("1.00"), status=status,
-                                      ct_product_id=ct_product_id)
-
-    def give_friend_token(self):
-        service = services.get_cardtrader(self.other)
-        service.api_token, service.ct_user_id = "friend-token", 78
-        service.save()
-
-    def test_friend_without_token_cannot_sell(self):
-        self.friend_listing()
-        order = Order.objects.create(owner=self.other, ct_id=99, code="c99", state=Order.State.PAID)
-        self.client.force_login(self.other)
-        self.ct.calls.clear()
-        for name, args in (("api_publish", []), ("api_sync_run", []), ("api_orders_import", []),
-                           ("api_order_ship", [order.pk])):
-            with self.subTest(name=name):
-                resp = self.client.post(reverse(f"ledger:{name}", args=args), {"tracking_code": "X"},
-                                        content_type="application/json")
-                self.assertEqual(resp.status_code, 502)
-                self.assertIn(CONNECT, resp.json()["detail"])
-        self.assertEqual(self.ct.calls, [])
-
-    def test_publish_only_pushes_own_listings(self):
-        self.give_friend_token()
-        self.friend_listing()
-        mine_before = Listing.objects.owned_by(self.user).filter(status=Listing.Status.TO_PUBLISH).count()
-        result = services.publish_pending(self.other)
-        self.assertEqual(result.published, 1)
-        self.assertEqual(Listing.objects.owned_by(self.other).get().status, Listing.Status.PUBLISHED)
-        self.assertEqual(
-            Listing.objects.owned_by(self.user).filter(status=Listing.Status.TO_PUBLISH).count(), mine_before,
-        )
-        self.assertTrue(SyncLog.objects.filter(owner=self.other, message__contains="listings published").exists())
+                                      market_listing_id=market_listing_id)
 
     def test_imported_orders_belong_to_the_importer_and_only_touch_own_stock(self):
-        self.give_friend_token()
-        theirs = self.friend_listing(status=Listing.Status.PUBLISHED, ct_product_id=5001)
+        theirs = self.friend_listing(status=Listing.Status.PUBLISHED, market_listing_id="5001")
         mine = Listing.objects.owned_by(self.user).get(item__card__name="Sheoldred, the Apocalypse")
-        mine.ct_product_id, mine.status = 5002, Listing.Status.PUBLISHED
+        mine.market_listing_id, mine.status = "5002", Listing.Status.PUBLISHED
         mine.save()
-        self.ct.orders = [order_payload(50, "paid", [(5001, "Lightning Bolt", 1), (5002, "Sheoldred", 1)])]
-        services.sync_all(self.other)
-        order = Order.objects.get(market_order_id=50)
+        order = ct_order(self.other, 50, "paid", [("5001", "Lightning Bolt", 1), ("5002", "Sheoldred", 1)])
         self.assertEqual(order.owner, self.other)
         self.assertEqual(order.items.get(market_listing_id=5001).listing, theirs)
         self.assertIsNone(order.items.get(market_listing_id=5002).listing)
@@ -1179,8 +740,7 @@ class SellingIsolationTest(LedgerTestCase):
         self.assertEqual(theirs.item.quantity, 1)
 
     def test_sync_does_not_touch_other_users_conflicts(self):
-        self.give_friend_token()
-        services.sync_all(self.other)
+        services.diff_listings(self.other, "ct", {})
         self.assertEqual(SyncConflict.objects.owned_by(self.user).filter(resolution="open").count(), 3)
 
     def test_other_users_objects_are_404(self):
@@ -1191,7 +751,6 @@ class SellingIsolationTest(LedgerTestCase):
         for method, name, args in (
             ("get", "api_listing", [listing.item.pk]), ("delete", "api_listing", [listing.item.pk]),
             ("post", "api_resolve", [conflict.pk]), ("get", "api_order", [order.pk]),
-            ("post", "api_order_ship", [order.pk]),
         ):
             with self.subTest(name=name, method=method):
                 resp = getattr(self.client, method)(reverse(f"ledger:{name}", args=args), {"keep": "remote"},

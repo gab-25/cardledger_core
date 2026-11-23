@@ -3,15 +3,12 @@ and the seller settings in the bulk actions and the add form."""
 
 from datetime import timedelta
 from decimal import Decimal
-from unittest import mock
 
 from django.urls import reverse
 from django.utils import timezone
 
 from accounts.models import SellerSettings
 
-from . import services
-from .cardtrader import CardTraderError
 from .models import Blueprint, CollectionItem, Listing, MissingCardReport, Order, OrderItem
 from .test_catalog_api import catalog
 from .test_dealer_api import COUNTERSPELL, SHEOLDRED, DealerTestCase
@@ -154,12 +151,3 @@ class SellerSettingsInUseTest(DealerTestCase):
         self.assertEqual(CollectionItem.objects.get(pk=resp.json()["id"]).condition, "EX")
         resp = add(self, SHEOLDRED, condition="GD")  # an explicit condition wins
         self.assertEqual(CollectionItem.objects.get(pk=resp.json()["id"]).condition, "GD")
-
-
-class PublishFailureLogTest(LedgerTestCase):
-    def test_failed_publish_is_logged_as_error(self):
-        with mock.patch.object(services, "resolve_blueprints", side_effect=CardTraderError("down")):
-            self.assertEqual(self.publish().status_code, 502)
-        entry = self.user.sync_logs.first()
-        self.assertEqual((entry.level, entry.message), ("error", "CardTrader: publish failed (down)"))
-

@@ -1,6 +1,6 @@
 """The overview API (/api/overview/): the dealer's dashboard, revenue, profit, stock value per game and price movers.
 
-Orders are global (CardTrader orders are not per game): revenue, orders, basket and gross profit cover every game.
+Orders are global (market orders are not per game): revenue, orders, basket and gross profit cover every game.
 The stock value is given for every game; only the movers are the items of the game of ?game.
 """
 

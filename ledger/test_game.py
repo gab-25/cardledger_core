@@ -10,14 +10,14 @@ from .tests import game
 class GameTest(TestCase):
     def test_six_games_exist(self):
         self.assertEqual(
-            list(Game.objects.order_by("cm_id").values_list("slug", "name", "cm_id", "ct_game_id")),
+            list(Game.objects.order_by("cm_id").values_list("slug", "name", "cm_id")),
             [
-                ("mtg", "Magic: The Gathering", 1, 1),
-                ("yugioh", "Yu-Gi-Oh!", 3, None),
-                ("pokemon", "Pokémon", 6, None),
-                ("onepiece", "One Piece", 18, None),
-                ("lorcana", "Disney Lorcana", 19, None),
-                ("riftbound", "Riftbound", 22, None),
+                ("mtg", "Magic: The Gathering", 1),
+                ("yugioh", "Yu-Gi-Oh!", 3),
+                ("pokemon", "Pokémon", 6),
+                ("onepiece", "One Piece", 18),
+                ("lorcana", "Disney Lorcana", 19),
+                ("riftbound", "Riftbound", 22),
             ],
         )
         self.assertEqual(Game.by_slug(MAGIC).name, "Magic: The Gathering")

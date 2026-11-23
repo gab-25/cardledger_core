@@ -12,7 +12,7 @@ from django.urls import reverse
 
 from .models import (
     ExtensionToken,
-    Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, SyncConflict, SyncLog, SyncService,
+    Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, SyncConflict, SyncLog,
 )
 from .tests import LedgerTestCase, game
 
@@ -102,8 +102,7 @@ class OwnedByTest(TestCase):
         order_item = OrderItem.objects.create(order=order, market_item_id=n, name="x")
         session = ScanSession.objects.create(owner=user, game=game())
         line = ScanLine.objects.create(session=session, condition="NM")
-        service = SyncService.objects.create(name="CardTrader", user=user)
-        conflict = SyncConflict.objects.create(service=service, item=item, local_value="1", remote_value="2")
+        conflict = SyncConflict.objects.create(item=item, local_value="1", remote_value="2")
         log = SyncLog.objects.create(message=f"log {n}", owner=user)
         return {
             CollectionItem: item, Listing: listing, Order: order, OrderItem: order_item,
@@ -127,7 +126,7 @@ class OwnerIsolationSweepTest(LedgerTestCase):
     # URL name → how to find one of self.user's objects for its argument
     TARGETS = {
         "api_item": lambda t: t.item.pk, "api_listing": lambda t: t.listing.item_id,
-        "api_order": lambda t: t.order.pk, "api_order_ship": lambda t: t.order.pk,
+        "api_order": lambda t: t.order.pk,
         "api_resolve": lambda t: t.conflict.pk, "api_extension_token": lambda t: t.ext_token.pk,
         "scan_api_session": lambda t: t.session.uuid, "scan_api_captures": lambda t: t.session.uuid,
         "scan_api_search": lambda t: t.session.uuid, "scan_api_manual": lambda t: t.session.uuid,

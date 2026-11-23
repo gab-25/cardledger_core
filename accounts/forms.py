@@ -40,14 +40,6 @@ class BusinessProfileForm(forms.ModelForm):
         super().__init__(keep_absent(data, instance, self.OPTIONAL), *args, instance=instance, **kwargs)
 
 
-class CardTraderTokenForm(forms.Form):
-    token = forms.CharField(
-        label="CardTrader API token",
-        widget=forms.PasswordInput(render_value=False, attrs={"autocomplete": "off"}),
-        help_text="Found in your CardTrader profile settings, under API. It is checked with CardTrader before saving.",
-    )
-
-
 class LoginForm(AuthenticationForm):
     """Django's login form taking the username or the email address (case-insensitive) in `username`, and remember.
 

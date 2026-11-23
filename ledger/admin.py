@@ -1,7 +1,7 @@
 from django.contrib import admin
 
 from .models import (Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, Listing,
-                     MarketConnection, ExtensionToken, MissingCardReport, Order, OrderItem, SyncConflict, SyncLog, SyncService)
+                     MarketConnection, ExtensionToken, MissingCardReport, Order, OrderItem, SyncConflict, SyncLog)
 
 
 @admin.register(Card)
@@ -24,13 +24,6 @@ class CollectionItemAdmin(admin.ModelAdmin):
 class ListingAdmin(admin.ModelAdmin):
     list_display = ["item", "market", "quantity", "price", "status", "market_listing_id", "pending_delete"]
     list_filter = ["market", "status"]
-
-
-@admin.register(SyncService)
-class SyncServiceAdmin(admin.ModelAdmin):
-    list_display = ["name", "user", "ct_user_id", "last_sync"]
-    list_filter = ["user"]
-    raw_id_fields = ["user"]
 
 
 @admin.register(SyncConflict)
@@ -64,7 +57,7 @@ class OrderAdmin(admin.ModelAdmin):
 
 @admin.register(Game)
 class GameAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "cm_id", "ct_game_id"]
+    list_display = ["name", "slug", "cm_id"]
 
 
 @admin.register(Expansion)

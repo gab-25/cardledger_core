@@ -1,21 +1,16 @@
-"""The orders API (/api/orders/): CardTrader sale orders, their packing list, shipping and import."""
+"""The orders API (/api/orders/): the sale orders of every market and their packing list. Orders are imported and
+shipped by the browser extension (POST /api/extension/report/ and shipped/)."""
 
 from django.db.models import Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
-from rest_framework import serializers
 from rest_framework.decorators import api_view
-from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from .. import services
-from ..cardtrader import CardTraderError
-from ..forms import ShipForm
-from ..models import Market, Order
+from ..models import Market, MarketConnection, Order
 from ..presentation import ORDER_TABS, order_badge
-from .common import doc, form_body, messages_response, msg, query
-from .errors import Blocked, ServiceError
+from .common import doc, query
 
 TAGS = ["orders"]
 ROW_LIMIT = 200
@@ -53,8 +48,17 @@ def _row(order):
     }
 
 
+def _orders_synced_at(user, market):
+    """When the extension last read the orders of market (of any market when market is ""), None if never."""
+    conns = MarketConnection.objects.owned_by(user).exclude(orders_synced_at=None)
+    if market:
+        conns = conns.filter(market=market)
+    return conns.order_by("-orders_synced_at").values_list("orders_synced_at", flat=True).first()
+
+
 @doc(TAGS, "Orders of one tab (?tab: to_ship, ct_zero, shipped, completed, issues; ?market: one market's) with "
-           "the shipping stats (of the market filtered)",
+           "the shipping stats (of the market filtered) and orders_synced_at (the extension's latest read of the "
+           "orders, of that market or any)",
      parameters=[query("tab", "The tab (default: to_ship)", enum=list(ORDER_TABS)),
                  query("market", "Only this market's orders (cm, ct)", enum=Market.values)])
 @api_view(["GET"])
@@ -89,7 +93,7 @@ def orders(request):
         "market": market,
         "stats": stats,
         "tabs": tabs,
-        "orders_synced_at": services.get_cardtrader(request.user).orders_synced_at,
+        "orders_synced_at": _orders_synced_at(request.user, market),
         "results": [_row(o) for o in shown[:ROW_LIMIT]],
     })
 
@@ -131,39 +135,3 @@ def order(request, pk):
         "tracking_code": obj.tracking_code,
         "items": [_order_item(it) for it in sorted(obj.items.all(), key=_packing_key)],
     })
-
-
-@doc(TAGS, "Save the tracking code (save_tracking: true) or mark the order as shipped",
-     request=form_body("Ship", ShipForm, save_tracking=serializers.BooleanField(
-         required=False, help_text="true: only save the tracking code on CardTrader, without shipping")))
-@api_view(["POST"])
-def ship(request, pk):
-    obj = get_object_or_404(Order.objects.owned_by(request.user), pk=pk)
-    form = ShipForm({"tracking_code": request.data.get("tracking_code") or ""})
-    if not form.is_valid():
-        raise ValidationError({"detail": "Invalid tracking code.", "code": "invalid"})
-    tracking_code = form.cleaned_data["tracking_code"]
-    try:
-        if request.data.get("save_tracking"):
-            services.save_tracking_code(obj, tracking_code)
-            return messages_response(msg("success", "Tracking code saved on CardTrader."), shipped=False)
-        if obj.market != Market.CARDTRADER:
-            raise Blocked(services.NOT_CARDTRADER)
-        if not obj.can_ship:
-            raise Blocked(f"Order #{obj.code} is {obj.state_label.lower()}: it cannot be shipped.")
-        services.ship_order(obj, tracking_code)
-    except CardTraderError as exc:
-        raise ServiceError(str(exc))
-    return messages_response(msg("success", f"Order #{obj.code} marked as shipped."), shipped=True)
-
-
-@doc(TAGS, "Import new and changed orders from CardTrader")
-@api_view(["POST"])
-def import_orders(request):
-    service = services.get_cardtrader(request.user)
-    try:
-        with services.user_client(request.user) as client:
-            created, updated = services.import_orders(client, service)
-    except CardTraderError as exc:
-        raise ServiceError(f"Orders not imported: {exc}")
-    return messages_response(msg("success", f"Orders imported: {created} new, {updated} updated."))

@@ -23,7 +23,7 @@ def get_or_create_card(game, name, set_code, collector_number="", **defaults):
     return card
 
 
-PRODUCT_CONDITION = Condition.NEAR_MINT  # stored on products, which have no condition on CardTrader
+PRODUCT_CONDITION = Condition.NEAR_MINT  # stored on products, which have no condition
 
 
 class CatalogItemForm(forms.Form):
@@ -133,8 +133,3 @@ class BulkForm(forms.Form):
 
 class CsvImportForm(forms.Form):
     file = forms.FileField(label="CSV file")
-
-
-
-class ShipForm(forms.Form):
-    tracking_code = forms.CharField(max_length=120, required=False)

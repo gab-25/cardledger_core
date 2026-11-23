@@ -19,13 +19,11 @@ from django.utils.dateparse import parse_datetime
 import cv2
 import numpy as np
 
-from . import catalog, recognition, services, vision
+from . import catalog, recognition, vision
 from .api.scan import SESSION_LIST_LIMIT
 from .api.serializers import MAX_FRAME_BYTES
 from .forms import CatalogItemForm, ItemForm, ListingForm
-from .cardtrader import CardTraderError
-from .models import (Blueprint, CollectionItem, Expansion, GameVisionIndex, ScanCapture, ScanLine, ScanSession,
-                     SyncService)
+from .models import Blueprint, CollectionItem, Expansion, GameVisionIndex, ScanCapture, ScanLine, ScanSession
 from .tests import LedgerTestCase, cm_id, game, load_catalog
 from .test_game_api import pokemon_setup
 from .test_vision_utils import make_index, photo_of_card
@@ -58,9 +56,6 @@ class ScanApiBase(LedgerTestCase):
         patcher = mock.patch.object(recognition, "match_photo", wraps=recognition.match_photo)
         self.recognize = patcher.start()
         self.addCleanup(patcher.stop)
-        service = services.get_cardtrader(self.user)
-        service.api_token = "ct-token"
-        service.save()
         self.client.defaults["HTTP_USER_AGENT"] = IPHONE
 
     def give_index(self, the_game, entries):
@@ -447,13 +442,11 @@ class CaptureTest(ScanApiBase):
 
 
 class MissingServicesTest(ScanApiBase):
-    def test_scan_works_without_any_cardtrader_token(self):
-        SyncService.objects.update(api_token="")
-        self.client.force_login(self.other)  # no CardTrader token of their own either
+    def test_scan_works_for_any_user(self):
+        self.client.force_login(self.other)  # no market connected
         self.assertEqual(self.call("get", "scan_api_setup").json()["missing"], [])
         session = self.start()
         self.assertEqual(self.capture(session).json()["result"], "added")
-        self.assertEqual(self.ct.calls, [])  # CardTrader is never contacted
 
     def test_capture_with_empty_catalog_says_so(self):
         session = self.start()
@@ -463,12 +456,7 @@ class MissingServicesTest(ScanApiBase):
         self.assertNotIn("help_url", body)
         self.assertEqual(self.calls, 0)
 
-    def test_session_start_does_not_call_info(self):
-        self.start()
-        self.assertNotIn(("GET", "/info"), self.ct.calls)
-
     def test_setup_lists_missing_services(self):
-        SyncService.objects.update(api_token="")
         Expansion.objects.all().delete()
         body = self.call("get", "scan_api_setup").json()
         self.assertEqual(body["warnings"], [])
@@ -833,7 +821,6 @@ class SchemaTest(LedgerTestCase):
         self.assertNotIn("name", ItemForm.base_fields)
         self.assertEqual(body("/api/collection/import/", "post"), {"multipart/form-data": {"file"}})
         self.assertEqual(body("/api/listings/{item_pk}/", "put")["application/json"], listing)
-        self.assertEqual(body("/api/orders/{id}/ship/", "post")["application/json"], {"tracking_code", "save_tracking"})
         self.assertEqual(body("/api/sync/conflicts/{id}/resolve/", "post")["application/json"], {"keep"})
         self.assertEqual(body("/api/account/profile/", "put")["application/json"], {"first_name", "last_name", "email",
                                                                          "shop_name", "vat_number"})
@@ -841,10 +828,10 @@ class SchemaTest(LedgerTestCase):
                                                                                      "markets"})
         self.assertEqual(body("/api/account/password/", "post")["application/json"],
                          {"old_password", "new_password1", "new_password2"})
-        self.assertEqual(body("/api/account/cardtrader-token/", "put")["application/json"], {"token"})
-        for path in ("/api/auth/logout/", "/api/listings/publish/",
-                     "/api/orders/import/", "/api/sync/run/"):
-            self.assertEqual(body(path, "post"), {}, path)
+        self.assertEqual(body("/api/auth/logout/", "post"), {})
+        for path in ("/api/account/cardtrader-token/", "/api/extension/cardtrader-token/", "/api/listings/publish/",
+                     "/api/orders/import/", "/api/sync/run/", "/api/orders/{id}/ship/"):
+            self.assertNotIn(path, schema["paths"])
 
         def query(path):
             return {p["name"] for p in schema["paths"][path]["get"].get("parameters", []) if p["in"] == "query"}

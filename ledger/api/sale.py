@@ -1,5 +1,5 @@
 """The sale API (/api/listings/): the listings of every market, their edit form (one listing per item and market),
-bulk pause/resume/delete, publishing to CardTrader and market prices."""
+bulk pause/resume/delete and market prices. Listings reach their market only through the browser extension's sync."""
 
 from django.db.models import DecimalField, ExpressionWrapper, F, Sum
 from django.shortcuts import get_object_or_404
@@ -11,12 +11,10 @@ from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 
 from .. import cardmarket, services
-from ..cardtrader import CardTraderError
 from ..forms import ListingForm
 from ..models import CollectionItem, Listing, Market
 from ..presentation import listing_badge
 from .common import GAME, body, doc, form_body, form_errors, game_param, messages_response, msg, query
-from .errors import ServiceError
 
 TAGS = ["sale"]
 VALUE = ExpressionWrapper(F("price") * F("quantity"), output_field=DecimalField())
@@ -104,8 +102,7 @@ def _listing_out(listing):
 
 @doc(TAGS, "The listings of a collection item, one per market: read (GET: listings, plus listing, the CardTrader "
            "one or a new one's defaults), create or change one (PUT, market default ct), remove one (DELETE "
-           "?market=, default ct: a CardTrader listing is deleted on CardTrader, another one still on its market "
-           "by the next sync)",
+           "?market=, default ct: one still on its market is deleted there by the next sync)",
      request=form_body("Listing", ListingForm, market=serializers.ChoiceField(
          choices=Market.choices, required=False, help_text="Default ct")),
      parameters=[query("market", "DELETE: the market of the listing to remove (default ct)", enum=Market.values)])
@@ -119,10 +116,7 @@ def listing(request, item_pk):
         existing = item.listings.filter(market=market, pending_delete=False).first()
         if existing is None:
             raise NotFound()
-        try:
-            services.remove_listing(existing)
-        except CardTraderError as exc:
-            raise ServiceError(f"Listing not removed: {exc}")
+        services.remove_listing(existing)
         return messages_response(msg("success", "Listing removed."))
 
     if request.method == "PUT":
@@ -199,23 +193,7 @@ def bulk(request):
         text = f"Resumed {n} listing{'s' if n != 1 else ''}: they will be published by the next sync."
     else:
         for obj in qs.select_related("item__card"):
-            services.remove_listing(obj, remote=False)
+            services.remove_listing(obj)
             n += 1
         text = f"Removed {n} listing{'s' if n != 1 else ''}."
     return messages_response(msg("success" if n else "warning", text), count=n)
-
-
-@doc(TAGS, "Publish the CardTrader listings waiting to be published to CardTrader (one game, or every game)",
-     parameters=[query("game", "Slug of the game; empty: every game")])
-@api_view(["POST"])
-def publish(request):
-    params = request.query_params
-    game = game_param(params) if params.get("game", "").strip() else None
-    try:
-        result = services.publish_pending(request.user, game)
-    except CardTraderError as exc:
-        raise ServiceError(f"Publish failed: {exc}")
-    n = result.published
-    msgs = [msg("success", f"Published {n} listing{'s' if n != 1 else ''} to CardTrader.")]
-    msgs += [msg("warning", f"{l.item.card.name}: {reason}") for l, reason in result.failed]
-    return messages_response(*msgs)

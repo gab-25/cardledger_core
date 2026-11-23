@@ -4,7 +4,6 @@ settings, the activity log."""
 import re
 import shutil
 import tempfile
-from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core import mail
@@ -14,12 +13,10 @@ from django.urls import reverse
 from django.utils import timezone
 
 from ledger import services
-from ledger.cardtrader import CardTraderError
 from ledger.models import CardmarketPrice, Listing, SyncLog
 from ledger.test_game_api import pokemon_setup
 
 from .models import AuditEvent, BusinessDetails, Profile, SellerSettings, record
-from .tests import fake_client
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 
@@ -154,34 +151,23 @@ class MeTest(TestCase):
         return next(m for m in self.me()["markets"] if m["code"] == "ct")
 
     def test_market_status(self):
+        """CardTrader's status is its connection's, like Cardmarket's: no log or token rule."""
         self.assertEqual(self.market()["status"], "off")
-        service = services.get_cardtrader(self.user)
-        service.api_token = "tok"
-        service.save()
+        conn = services.connection(self.user, "ct")
         self.assertEqual((self.market()["status"], self.market()["connected"]), ("never", True))
-        service.last_sync = timezone.now()
-        service.save()
-        SyncLog.objects.create(owner=self.user, message="CardTrader: listings in sync")
+        services.mark_synced(self.user, "ct")
         self.assertEqual(self.market()["status"], "ok")
         SyncLog.objects.create(owner=self.user, message="CardTrader: sync failed (boom)", level=SyncLog.Level.ERROR)
+        self.assertEqual(self.market()["status"], "ok")  # the log does not decide
+        services.mark_synced(self.user, "ct", error="boom")
         self.assertEqual(self.market()["status"], "error")
-        SyncLog.objects.create(owner=None, message="Catalog sync: done")  # global: not CardTrader's
-        self.assertEqual(self.market()["status"], "error")
-        SyncLog.objects.create(owner=self.user, message="CardTrader: 2 listings published")
-        self.assertEqual(self.market()["status"], "ok")
+        conn.refresh_from_db()
+        conn.status = conn.Status.OFF
+        conn.save()
+        self.assertEqual((self.market()["status"], self.market()["connected"]), ("off", False))
+        services.mark_synced(self.user, "ct")
         self.client.force_login(self.other)  # another user's state is not shared
         self.assertEqual(self.market()["status"], "off")
-
-    def test_failed_sync_is_logged_as_error(self):
-        service = services.get_cardtrader(self.user)
-        service.api_token, service.last_sync = "tok", timezone.now()
-        service.save()
-        with mock.patch.object(services, "make_client", side_effect=CardTraderError("unauthorized")):
-            resp = self.client.post(reverse("ledger:api_sync_run"))
-        self.assertEqual(resp.status_code, 502)
-        log = SyncLog.objects.filter(owner=self.user).first()
-        self.assertEqual((log.level, log.message), ("error", "CardTrader: sync failed (unauthorized)"))
-        self.assertEqual(self.market()["status"], "error")
 
 
 class BusinessTest(TestCase):
@@ -324,14 +310,6 @@ class ActivityTest(TestCase):
         self.assertEqual((event["kind"], event["text"], event["ip"]), ("password_changed", "Password changed",
                                                                        "127.0.0.1"))
         self.assertEqual(set(event), {"at", "kind", "text", "ip", "device"})
-
-    @mock.patch.object(services, "make_client", side_effect=fake_client)
-    def test_token_saved_and_removed(self, _):
-        url = reverse("accounts:api_token")
-        self.client.put(url, {"token": "good-token"}, content_type="application/json")
-        self.client.put(url, {"token": "bad"}, content_type="application/json")  # rejected: nothing recorded
-        self.client.delete(url)
-        self.assertEqual([e["kind"] for e in self.activity()], ["token_removed", "token_saved"])
 
     def test_newest_first_last_50_own_only(self):
         for i in range(55):
