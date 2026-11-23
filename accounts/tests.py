@@ -9,6 +9,8 @@ from ledger import services
 from ledger.cardtrader import CardTraderClient
 from ledger.models import SyncLog
 
+from .models import Profile
+
 
 class ProfileTest(TestCase):
     def setUp(self):
@@ -59,6 +61,27 @@ class ProfileTest(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.get_full_name(), "Gabriele S")
         self.assertEqual(self.user.email, "new@example.com")
+
+    def test_business_profile(self):
+        user = self.client.get(reverse("accounts:api_me")).json()["user"]
+        self.assertEqual((user["shop_name"], user["vat_number"]), ("", ""))
+        self.assertFalse(Profile.objects.exists())  # created on demand, not by reading
+        resp = self.put("api_profile", {"email": "gab@example.com", "shop_name": "Gab Cards",
+                                        "vat_number": "IT01234567890"})
+        self.assertEqual(resp.status_code, 200)
+        user = self.client.get(reverse("accounts:api_me")).json()["user"]
+        self.assertEqual((user["shop_name"], user["vat_number"]), ("Gab Cards", "IT01234567890"))
+        # left out: unchanged
+        self.put("api_profile", {"first_name": "Gabriele", "email": "gab@example.com"})
+        profile = Profile.objects.get(user=self.user)
+        self.assertEqual((profile.shop_name, profile.vat_number), ("Gab Cards", "IT01234567890"))
+        self.assertEqual(Profile.objects.count(), 1)
+
+    def test_business_profile_errors_with_user_errors(self):
+        resp = self.put("api_profile", {"email": "OTHER@example.com", "vat_number": "X" * 41})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.json()), {"email", "vat_number"})
+        self.assertFalse(Profile.objects.exists())
 
     def test_email_must_be_unique(self):
         resp = self.put("api_profile", {"email": "OTHER@example.com"})

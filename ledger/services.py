@@ -5,7 +5,7 @@ import io
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from django.db import transaction
 from django.db.models import Q
@@ -39,7 +39,7 @@ from .models import (
     SyncService,
 )
 
-CSV_FIELDS = ["name", "set", "condition", "language", "foil", "quantity", "number"]
+CSV_FIELDS = ["name", "set", "condition", "language", "foil", "quantity", "number", "cost", "location"]
 CARDTRADER = "CardTrader"
 
 
@@ -136,6 +136,8 @@ def export_csv(items, stream):
             "1" if item.foil else "0",
             item.quantity,
             item.card.collector_number,
+            "" if item.cost is None else f"{item.cost:.2f}",
+            item.location,
         ])
 
 
@@ -150,6 +152,19 @@ def _choice(value, choices, default, field_name, line):
     if value not in choices.values:
         raise CsvImportError(f"Line {line}: invalid {field_name} '{value}'")
     return value
+
+
+def _csv_cost(value, line):
+    """The cost column: None when blank, else a non-negative amount."""
+    if not value:
+        return None
+    try:
+        cost = Decimal(value.replace(",", "."))
+    except ArithmeticError as exc:
+        raise CsvImportError(f"Line {line}: invalid cost '{value}'") from exc
+    if not cost.is_finite() or cost < 0 or cost >= Decimal("1e8"):
+        raise CsvImportError(f"Line {line}: invalid cost '{value}'")
+    return cost.quantize(Decimal("0.01"))
 
 
 def link_blueprint(card):
@@ -193,6 +208,15 @@ def import_csv(uploaded_file, owner, game=None):
                 raise CsvImportError(f"Line {line}: invalid quantity") from exc
             if quantity < 0:
                 raise CsvImportError(f"Line {line}: quantity must be positive")
+            # optional columns: blank (or absent) leaves an existing item's value as it is
+            extra = {}
+            cost = _csv_cost(row.get("cost", ""), line)
+            if cost is not None:
+                extra["cost"] = cost
+            if row.get("location"):
+                if len(row["location"]) > 40:
+                    raise CsvImportError(f"Line {line}: location longer than 40 characters")
+                extra["location"] = row["location"]
 
             card = get_or_create_card(
                 game,
@@ -207,13 +231,15 @@ def import_csv(uploaded_file, owner, game=None):
                 condition=_choice(row.get("condition"), Condition, Condition.NEAR_MINT, "condition", line),
                 language=_choice(row.get("language"), Language, Language.EN, "language", line),
                 foil=row.get("foil", "").lower() in {"1", "true", "yes", "y", "foil"},
-                defaults={"quantity": quantity},
+                defaults={"quantity": quantity, **extra},
             )
             if item_created:
                 created += 1
             else:
                 item.quantity = quantity
-                item.save(update_fields=["quantity", "updated_at"])
+                for name, value in extra.items():
+                    setattr(item, name, value)
+                item.save(update_fields=["quantity", *extra, "updated_at"])
                 updated += 1
 
         _log(f"CSV import: {created} new cards, {updated} quantities updated", owner=owner)
@@ -523,6 +549,59 @@ def publish_pending(user, game=None):
     _log(f"{CARDTRADER}: {result.published} listings published", owner=user)
     for listing, reason in result.failed:
         _log(f"{CARDTRADER}: {listing.item.card.name} not published ({reason})", SyncLog.Level.WARNING, owner=user)
+    return result
+
+
+PRICE_STEP = Decimal("0.05")
+
+
+def price_over_trend(trend, pct):
+    """trend × (1 + pct/100), rounded to the nearest 0.05 (half up), never under 0.05."""
+    price = trend * (1 + Decimal(pct) / 100)
+    price = (price / PRICE_STEP).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * PRICE_STEP
+    return max(price, PRICE_STEP).quantize(Decimal("0.01"))
+
+
+@dataclass
+class BulkListResult:
+    listed: int = 0
+    no_trend: int = 0  # skipped: no Cardmarket trend
+    no_copies: int = 0  # skipped (list): no copies left to sell
+    no_listing: int = 0  # skipped (reprice): no active listing
+
+
+def list_at_trend(items, pct, reprice=False):
+    """Put items on sale at price_over_trend(their trend, pct), as listings to publish.
+
+    items must carry the `trend` annotation (cardmarket.trend_price()). list (reprice=False) creates the listing of
+    an item without one (all its copies) and reprices an existing one; a sold listing is reopened as a new product.
+    reprice changes only the active (not sold) listings. A published listing whose price changes goes back to
+    "to publish", like an edit of the listing form, so the next publish updates it on CardTrader.
+    """
+    result = BulkListResult()
+    for item in items.select_related("listing"):
+        listing = getattr(item, "listing", None)
+        active = listing is not None and listing.status != Listing.Status.SOLD
+        if reprice and not active:
+            result.no_listing += 1
+            continue
+        if item.trend is None:
+            result.no_trend += 1
+            continue
+        if not active and item.quantity < 1:
+            result.no_copies += 1
+            continue
+        price = price_over_trend(item.trend, pct)
+        if listing is None:
+            Listing.objects.create(item=item, price=price, quantity=item.quantity, status=Listing.Status.TO_PUBLISH)
+        elif not active:  # sold out on CardTrader: a new product
+            listing.price, listing.quantity, listing.status = price, item.quantity, Listing.Status.TO_PUBLISH
+            listing.ct_product_id = listing.sold_at = None
+            listing.save()
+        elif listing.price != price:
+            listing.price, listing.status = price, Listing.Status.TO_PUBLISH
+            listing.save(update_fields=["price", "status", "updated_at"])
+        result.listed += 1
     return result
 
 

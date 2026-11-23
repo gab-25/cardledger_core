@@ -835,7 +835,9 @@ class SchemaTest(LedgerTestCase):
         self.assertEqual(body("/api/listings/{item_pk}/", "put")["application/json"], listing)
         self.assertEqual(body("/api/orders/{id}/ship/", "post")["application/json"], {"tracking_code", "save_tracking"})
         self.assertEqual(body("/api/sync/conflicts/{id}/resolve/", "post")["application/json"], {"keep"})
-        self.assertEqual(body("/api/account/profile/", "put")["application/json"], {"first_name", "last_name", "email"})
+        self.assertEqual(body("/api/account/profile/", "put")["application/json"], {"first_name", "last_name", "email",
+                                                                         "shop_name", "vat_number"})
+        self.assertEqual(body("/api/collection/bulk/", "post")["application/json"], {"ids", "action", "location", "pct"})
         self.assertEqual(body("/api/account/password/", "post")["application/json"],
                          {"old_password", "new_password1", "new_password2"})
         self.assertEqual(body("/api/account/cardtrader-token/", "put")["application/json"], {"token"})
@@ -846,7 +848,9 @@ class SchemaTest(LedgerTestCase):
         def query(path):
             return {p["name"] for p in schema["paths"][path]["get"].get("parameters", []) if p["in"] == "query"}
 
-        self.assertEqual(query("/api/collection/"), {"q", "foil", "set", "cond", "category", "game", "page"})
+        self.assertEqual(query("/api/collection/"), {"q", "foil", "set", "cond", "category", "location",
+                                                       "view", "game", "page"})
+        self.assertEqual(query("/api/overview/"), {"game"})
         self.assertEqual(query("/api/listings/"), {"status", "game"})
         self.assertEqual(query("/api/orders/"), {"tab"})
         self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "game", "category", "owned", "page"})

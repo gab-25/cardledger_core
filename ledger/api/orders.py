@@ -78,7 +78,27 @@ def orders(request):
     })
 
 
-@doc(TAGS, "One order with its address and packing list")
+def _location(order_item):
+    """The storage location of the collection item an order line sold ("" when unknown)."""
+    return order_item.listing.item.location if order_item.listing else ""
+
+
+def _packing_key(order_item):
+    """Packing list order: by location (lines without one last), then by name."""
+    location = _location(order_item)
+    return (location == "", location, order_item.name)
+
+
+def _order_item(it):
+    return {
+        "id": it.pk, "name": it.name, "expansion": it.expansion, "foil": it.foil,
+        "condition": it.condition, "language": it.language, "quantity": it.quantity,
+        "price": _money(it.price), "item_pk": it.listing.item_id if it.listing else None,
+        "location": _location(it),
+    }
+
+
+@doc(TAGS, "One order with its address and packing list (sorted by the items' storage location, then name)")
 @extend_schema(operation_id="order_retrieve")
 @api_view(["GET"])
 def order(request, pk):
@@ -93,14 +113,7 @@ def order(request, pk):
         "buyer_phone": obj.buyer_phone,
         "max_shipping_days": obj.max_shipping_days,
         "tracking_code": obj.tracking_code,
-        "items": [
-            {
-                "id": it.pk, "name": it.name, "expansion": it.expansion, "foil": it.foil,
-                "condition": it.condition, "language": it.language, "quantity": it.quantity,
-                "price": _money(it.price), "item_pk": it.listing.item_id if it.listing else None,
-            }
-            for it in obj.items.all()
-        ],
+        "items": [_order_item(it) for it in sorted(obj.items.all(), key=_packing_key)],
     })
 
 

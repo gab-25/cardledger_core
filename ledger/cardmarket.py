@@ -8,6 +8,8 @@ from datetime import datetime
 from decimal import Decimal
 
 import httpx
+from django.db.models import Case, DecimalField, OuterRef, Subquery, Value, When
+from django.db.models.functions import NullIf
 
 from .catalog import blueprint_of, normalize_number
 from .models import Blueprint, Card, CardmarketPrice
@@ -36,6 +38,27 @@ def make_client(transport=None):
 
 
 # --- lookups ---------------------------------------------------------------
+
+def blueprint_value(field):
+    """The value of a field of a collection item's catalog blueprint, as a subquery (None when the card has none)."""
+    return Subquery(Blueprint.objects.filter(cm_product_id=OuterRef("card__cm_product_id")).values(field)[:1])
+
+
+def item_guide_price(field):
+    """A price guide field (trend, avg7, avg30, ...) of a collection item's printing, as an expression: the *_foil
+    one for a foil card (not a product); None when unknown or 0.00 (the guide's value for a missing finish)."""
+    price = Case(
+        When(foil=True, card__is_product=False, then=blueprint_value(f"cm_product__{field}_foil")),
+        default=blueprint_value(f"cm_product__{field}"),
+        output_field=DecimalField(max_digits=10, decimal_places=2),
+    )
+    return NullIf(price, Value(Decimal("0.00")))
+
+
+def trend_price():
+    """The Cardmarket trend of a collection item's printing (trend_foil for a foil card), None when unknown or 0.00."""
+    return item_guide_price("trend")
+
 
 def blueprint_for(card):
     """The catalog printing of a Ledger card (catalog.blueprint_of)."""

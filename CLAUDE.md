@@ -34,11 +34,14 @@ uv run python manage.py sync_catalog             # run the nightly catalog + pri
                                                  # the first migrate: the catalog starts empty)
 ```
 
-There is no linter or formatter configured. Settings come only from the environment / `.env` (see `.env.example`).
+There is no linter or formatter configured. Settings come only from the environment / `.env` (see `.env.example`);
+`OPENROUTER_API_KEY` and `OPENROUTER_MODEL` deliberately have no defaults in code.
 
 ## Architecture
 
-- **Apps**: `config/` (settings, root URLs, the UI view), `accounts/` (auth and profile API in `accounts/api.py`),
+- **Apps**: `config/` (settings, root URLs, the UI view), `accounts/` (auth and profile API in `accounts/api.py`;
+  `accounts.Profile`, one-to-one with the user and created on demand by `profile_of`, holds the business details
+  `shop_name`/`vat_number`, shown in `me`'s `user` and saved by `PUT /api/account/profile/`),
   `ledger/` (the domain). Views in `ledger/api/*.py` and `accounts/api.py` are function-based DRF `@api_view`s, one
   module per UI page; business logic lives in `ledger/services.py` (CardTrader sync, publish, orders, CSV) and
   `ledger/scan.py`, not in the views.
@@ -78,17 +81,22 @@ There is no linter or formatter configured. Settings come only from the environm
   names per game from the blueprint's `editable_properties` (Magic's payload is unchanged); a non-Magic listing
   CardTrader can't describe fails instead of being published. The catalog and
   collection JSON keep the old field names (`ct_id`, `category_id`), now holding Cardmarket ids.
-- **Scan pipeline**: photo → `ledger/recognition.py` (`match_photo(photo, index, game, expansion)`: the
-  `cardledger_vision` library compares the card's image with the game's vision index, locked on the session's
-  expansion, and maps the Cardmarket ids it answers to the `Blueprint`s of the local catalog, dropping ids the catalog
-  lost) → `ledger/scan.py` (draft lines of a `ScanSession`, saved into the collection at the end; no prices, nothing
-  is put on sale; a line takes the session's language, never foil, and `read_name` is the best candidate's name, as
-  nothing is read from the card). No external service is called. The index of each game (`vision/v1/<slug>.bin` in
-  the catalog bucket, built by gab-25/cardledger_vision) is stored by the nightly sync in `GameVisionIndex` and loaded
-  by `vision.index_for(game)`, cached per process and reloaded when its sha256 changes; a game without one answers
-  `captures` with `ServiceMissing` (manual search still works). `ScanSession.game` is set at creation and every later
-  step takes the game from the session; `catalog.expansion_by_code` falls back to a single `<code>-…` slug code; the
-  phone URL and the save redirect carry `/<game>/`. Tests build real indexes with `ledger/test_vision_utils.py`.
+- **Dealer data**: `CollectionItem.cost` (purchase price per copy) and `location` (storage, e.g. "A3·12"), in the
+  item API, the CSV columns and the order packing list (`orders/<pk>/` items carry `location`, sorted by it).
+  `GET /api/collection/` rows add `trend` (= `price`), `cost`, `location`, `listing_price`, `added_at`; `?view=`
+  (`_views()` in `ledger/api/collection.py`: `below_trend`, `not_listed`, `stale`, `bulk`; a sold listing counts as
+  none) with `views` counts that honour the other filters. `POST /api/collection/bulk/` acts on the user's items of
+  the game (`set_location`, `delete`, `list`/`reprice` through `services.list_at_trend`, priced by
+  `price_over_trend`). `GET /api/overview/` (`ledger/api/overview.py`) is the dashboard: revenue and profit from the
+  global orders, stock value per game, the game's price movers. Price guide expressions for items (`trend_price`,
+  `item_guide_price`, foil-aware) live in `ledger/cardmarket.py`.
+- **Scan pipeline**: photo → `ledger/openrouter.py` (vision model reads the card) → `ledger/recognition.py` (matches
+  it to a `Blueprint` of the local catalog) → `ledger/scan.py` (draft lines of a `ScanSession`, saved into the
+  collection at the end; no prices, nothing is put on sale). `ScanSession.game` is set at creation and every later step
+  takes the game from the session: `recognition.match(rec, expansion, game)`, a per-game prompt
+  (`openrouter.prompt_for(slug)`), non-Magic names compared without a trailing ` [...]`/` (...)` catalog suffix,
+  `catalog.expansion_by_code` falling back to a single `<code>-…` slug code; the phone URL and the save redirect
+  carry `/<game>/`.
   The scan API (`ledger/api/scan.py`) is the only one with real DRF serializers (`ledger/api/serializers.py`).
 - **API conventions** (`ledger/api/common.py`, `ledger/api/errors.py`): session auth + CSRF (`X-CSRFToken` from the
   `csrftoken` cookie); validation goes through Django forms and `form_errors(form)` turns them into DRF 400s;

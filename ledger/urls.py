@@ -4,6 +4,7 @@ from .api import catalog as catalog_api
 from .api import collection as collection_api
 from .api import games as games_api
 from .api import orders as orders_api
+from .api import overview as overview_api
 from .api import sale as sale_api
 from .api import scan as scan_api
 from .api import sync as sync_api
@@ -15,6 +16,7 @@ urlpatterns = [
     path("api/games/", games_api.games, name="api_games"),
     path("api/collection/", collection_api.collection, name="api_collection"),
     path("api/collection/<int:pk>/", collection_api.item, name="api_item"),
+    path("api/collection/bulk/", collection_api.bulk, name="api_collection_bulk"),
     path("api/collection/import/", collection_api.import_csv, name="api_import"),
     path("api/collection/export/", collection_api.export_csv, name="api_export"),
     path("api/listings/", sale_api.listings, name="api_listings"),
@@ -22,6 +24,7 @@ urlpatterns = [
     path("api/listings/<int:item_pk>/", sale_api.listing, name="api_listing"),
     path("api/catalog/", catalog_api.catalog, name="api_catalog"),
     path("api/catalog/categories/", catalog_api.categories, name="api_catalog_categories"),
+    path("api/overview/", overview_api.overview, name="api_overview"),
     path("api/orders/", orders_api.orders, name="api_orders"),
     path("api/orders/import/", orders_api.import_orders, name="api_orders_import"),
     path("api/orders/<int:pk>/", orders_api.order, name="api_order"),

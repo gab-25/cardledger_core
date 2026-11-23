@@ -144,6 +144,10 @@ class CollectionItem(models.Model):
     language = models.CharField(max_length=3, choices=Language.choices, default=Language.EN)
     foil = models.BooleanField(default=False)
     quantity = models.PositiveIntegerField(default=1)
+    cost = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, help_text="Purchase price of one copy",
+    )
+    location = models.CharField(max_length=40, blank=True, help_text='Storage location, e.g. "A3·12"')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

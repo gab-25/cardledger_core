@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django import forms
 from django.db.models import F
 from django.db.models.functions import Now
@@ -59,12 +61,33 @@ class CatalogItemForm(forms.Form):
         return item, True
 
 
+def keep_absent(data, instance, names):
+    """data with the instance's current value for each of names it doesn't send (optional fields left unchanged)."""
+    if data is None or all(name in data for name in names):
+        return data
+    data = data.copy() if hasattr(data, "copy") else dict(data)
+    for name in names:
+        if name not in data:
+            value = getattr(instance, name)
+            data[name] = "" if value is None else value
+    return data
+
+
 class ItemForm(forms.ModelForm):
-    """Edits the copies of a collection item; the product they are copies of never changes."""
+    """Edits the copies of a collection item; the product they are copies of never changes. cost and location are
+    optional: left out, they keep their value."""
+
+    OPTIONAL = ["cost", "location"]
+
+    cost = forms.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"), required=False,
+                              help_text="Purchase price of one copy")
 
     class Meta:
         model = CollectionItem
-        fields = ["condition", "language", "foil", "quantity"]
+        fields = ["condition", "language", "foil", "quantity", "cost", "location"]
+
+    def __init__(self, data=None, *args, instance=None, **kwargs):
+        super().__init__(keep_absent(data, instance, self.OPTIONAL), *args, instance=instance, **kwargs)
 
     def save(self, commit=True):
         if self.instance.card.is_product:
@@ -86,6 +109,18 @@ class ListingForm(forms.ModelForm):
         if qty < 1:
             raise forms.ValidationError("List at least one copy.")
         return qty
+
+
+class BulkForm(forms.Form):
+    """An action on several collection items (their ids are validated by the view): set_location (location),
+    delete, list or reprice (pct: percent over the Cardmarket trend, may be negative)."""
+
+    ACTIONS = [("set_location", "Set location"), ("delete", "Delete"), ("list", "List"), ("reprice", "Reprice")]
+
+    action = forms.ChoiceField(choices=ACTIONS)
+    location = forms.CharField(max_length=40, required=False)
+    pct = forms.DecimalField(max_digits=6, decimal_places=2, min_value=Decimal("-99"), max_value=Decimal("1000"),
+                             required=False, help_text="list/reprice: percent over the trend (default 0)")
 
 
 class CsvImportForm(forms.Form):

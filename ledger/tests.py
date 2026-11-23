@@ -595,7 +595,7 @@ class CsvTest(LedgerTestCase):
         resp = self.client.get(reverse("ledger:api_export"))
         self.assertTrue(resp["Content-Disposition"].startswith('attachment; filename="cardledger-'))
         csv_bytes = resp.content
-        self.assertTrue(csv_bytes.startswith(b"name,set,condition,language,foil,quantity,number\r\n"))
+        self.assertTrue(csv_bytes.startswith(b"name,set,condition,language,foil,quantity,number,cost,location\r\n"))
         before = CollectionItem.objects.count()
         upload = SimpleUploadedFile("c.csv", csv_bytes + "Lightning Bolt,M10,NM,EN,0,4,\n".encode())
         resp = self.client.post(reverse("ledger:api_import"), {"file": upload})

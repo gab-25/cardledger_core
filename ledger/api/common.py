@@ -25,9 +25,14 @@ def body(name, fields):
     return inline_serializer(name, fields)
 
 
+def form_fields(form_class):
+    """The serializer fields documenting a Django form's fields."""
+    return {key: _form_field(field) for key, field in form_class.base_fields.items()}
+
+
 def form_body(name, form_class, **extra):
     """The request body of a view that validates request.data with a Django form: the form's fields, plus extra."""
-    return body(name, {**{key: _form_field(field) for key, field in form_class.base_fields.items()}, **extra})
+    return body(name, {**form_fields(form_class), **extra})
 
 
 def _form_field(field):

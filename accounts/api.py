@@ -13,16 +13,18 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from ledger import services as ledger_services
-from ledger.api.common import GAME, doc, form_body, game_param, form_errors, messages_response, msg
+from ledger.api.common import GAME, doc, form_body, form_fields, game_param, form_errors, messages_response, msg
 from ledger.cardtrader import CardTraderError
 from ledger.models import Listing, Order
 
-from .forms import CardTraderTokenForm, ProfileForm
+from .forms import BusinessProfileForm, CardTraderTokenForm, ProfileForm
+from .models import profile_of
 
 TAGS = ["account"]
 
 
 def _user(user):
+    profile = profile_of(user)
     return {
         "username": user.get_username(),
         "first_name": user.first_name,
@@ -32,6 +34,8 @@ def _user(user):
         "is_staff": user.is_staff,
         "date_joined": user.date_joined,
         "last_login": user.last_login,
+        "shop_name": profile.shop_name,
+        "vat_number": profile.vat_number,
     }
 
 
@@ -95,13 +99,21 @@ def account(request):
     })
 
 
-@doc(TAGS, "Change first name, last name and email", request=form_body("Profile", ProfileForm))
+@doc(TAGS, "Change first name, last name and email, and the business details (shop name, VAT number: left out, "
+           "they keep their value)",
+     request=form_body("Profile", ProfileForm, **form_fields(BusinessProfileForm)))
 @api_view(["PUT"])
 def profile(request):
     form = ProfileForm(request.data, instance=request.user)
-    if not form.is_valid():
+    business = BusinessProfileForm(request.data, instance=profile_of(request.user))
+    valid = form.is_valid()
+    if not business.is_valid():
+        form.errors.update(business.errors)
+        valid = False
+    if not valid:
         raise form_errors(form)
     form.save()
+    business.save()
     return messages_response(msg("success", "Profile updated."))
 
 
