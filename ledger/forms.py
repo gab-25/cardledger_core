@@ -7,7 +7,7 @@ from django.db.models.functions import Now
 from accounts.models import seller_settings_of
 
 from . import catalog
-from .models import Blueprint, Card, CollectionItem, Condition, Language, Listing, Market
+from .models import Blueprint, Card, CollectionItem, Condition, Language, Listing, Market, Shipment
 
 
 def get_or_create_card(game, name, set_code, collector_number="", **defaults):
@@ -133,3 +133,57 @@ class BulkForm(forms.Form):
 
 class CsvImportForm(forms.Form):
     file = forms.FileField(label="CSV file")
+
+
+class PickedForm(forms.Form):
+    """Ticks (or unticks) an order line as picked."""
+
+    picked = forms.BooleanField(required=False)
+
+    def clean(self):
+        if "picked" not in self.data:
+            self.add_error("picked", "This field is required.")
+        return super().clean()
+
+
+class PackForm(forms.Form):
+    force = forms.BooleanField(required=False, help_text="Pack even if some lines are not picked")
+
+
+class IssueForm(forms.Form):
+    note = forms.CharField(max_length=1000, required=False, help_text="The problem; blank clears it")
+
+
+class ShipmentForm(forms.ModelForm):
+    """Edits a shipment: a field left out keeps its value; delivered/returned (booleans) mark it (now) or clear the
+    mark when sent."""
+
+    OPTIONAL = ["carrier", "tracking_code", "postage_cost", "note"]
+
+    postage_cost = forms.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"), required=False)
+    delivered = forms.BooleanField(required=False, help_text="Delivered (now) or not; left out: unchanged")
+    returned = forms.BooleanField(required=False, help_text="Returned (now) or not; left out: unchanged")
+
+    class Meta:
+        model = Shipment
+        fields = ["carrier", "tracking_code", "postage_cost", "note"]
+
+    def __init__(self, data=None, *args, instance=None, **kwargs):
+        super().__init__(keep_absent(data, instance, self.OPTIONAL), *args, instance=instance, **kwargs)
+
+    def save(self, commit=True):
+        from django.utils import timezone
+
+        shipment = self.instance
+        if "delivered" in self.data:
+            if self.cleaned_data["delivered"]:
+                shipment.delivered_at = shipment.delivered_at or timezone.now()
+                shipment.returned_at = None
+            else:
+                shipment.delivered_at = None
+        if "returned" in self.data:
+            if self.cleaned_data["returned"]:
+                shipment.returned_at = shipment.returned_at or timezone.now()
+            else:
+                shipment.returned_at = None
+        return super().save(commit=commit)

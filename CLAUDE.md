@@ -61,7 +61,7 @@ There is no linter or formatter configured. Settings come only from the environm
   export, listings, catalog and scan setup take `?game=<slug>` through `game_param(params)` / `GAME` in
   `ledger/api/common.py` (default `mtg`, unknown slug 400); `GET /api/scan/sessions/` and `me`'s
   `pending_changes` without `game` (absent or blank) cover every game; item and listing detail (`collection/<pk>/`, `listings/<pk>/`) return their `game`;
-  `GET /api/games/` lists the games. Orders, shipments, sync and `orders_to_ship` stay global. The catalog is rebuilt
+  `GET /api/games/` lists the games. Orders, shipments, sync and the order/shipment counters stay global. The catalog is rebuilt
   only by the nightly `ledger/catalog_sync.py`: it imports the files of the separate generator repo gab-25/cardledger_database from a private
   S3 bucket (`ledger/catalog_files.py`: one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest; the generator is run
   by hand, `cardledger-db generate` then `upload`; settings `CARDLEDGER_CATALOG_*`: bucket, endpoint, region, access
@@ -124,6 +124,33 @@ There is no linter or formatter configured. Settings come only from the environm
   out), `owned_locations`; filters `rarity`, `finish=foil`, `ordering`; `rarities`, and `suggestion` (pg_trgm, the
   game's closest name) when a search finds nothing; `POST /api/catalog/report-missing/` stores a
   `MissingCardReport` (admin).
+- **Orders pick/pack/ship** (`ledger/api/orders.py`, helpers `ledger/shipping.py`): `Order.packed_at`, `issue_note`/
+  `issue_at`, `invoice_number`, `OrderItem.picked`. `Order.objects.with_stage()` annotates `stage` (first that
+  applies): issue (an issue note, request_for_cancel, lost, canceled with paid_at), shipped (sent/arrived/done, also
+  closed and unpaid canceled: nothing to pack), packed, picking (a line picked), to_pack. Orders still to ship (paid,
+  hub_pending) have `due_by` = local date of paid_at + max_shipping_days **working** days (Mon-Fri, 2 when null) and
+  `due` overdue/today/ok (Europe/Rome), else null. `GET /api/orders/?tab=to_pack|packed|shipped|issues` (old keys
+  to_ship/ct_zero → to_pack, completed → shipped): to_pack = to_pack + picking, overdue first then paid_at; shipped
+  (sent/arrived/done) newest first; tab counts and stats (+ `shipped_today`) honour `?market`. Detail adds `next_id`
+  (next in the to-pack queue, wrapping; null when alone). `PATCH orders/<pk>/items/<id>/ {picked}`, `POST
+  orders/<pk>/pack/ {force}` (409 `blocked` if a line is unpicked or the order is not paid/hub_pending; answers
+  `next_id`), `unpack/`, `issue/ {note}` (blank clears). `GET orders/pick-list/?ids=` merges lines by collection item
+  (else name/expansion/condition/language/foil), sorted by location (empty last) then name; `GET orders/slips/?ids=`
+  gives `business` (`accounts.api.business_data`) and the order details, numbering those without an invoice number
+  (`services.assign_invoice_numbers`: prefix + `invoice_next_number` zero-padded to 4, under `select_for_update` of
+  the `BusinessDetails` row). Unknown or other users' ids are ignored.
+- **Shipments** (`ledger/api/shipments.py`): `Shipment` (1:1 order) is created by `services.record_shipment(order)`
+  once the order is sent/arrived/done, called by `services.save_order` (extension reports) and
+  `extension.mark_shipped`; later calls only fill blanks (seller edits stay) and set `delivered_at` the first time
+  the order is seen arrived/done. Carrier from the shipping method's words (`shipping.carrier_for`), `expected_by` =
+  shipped date + max_shipping_days calendar days (tracked 5 / untracked 10 when null). Migration 0041 backfilled the
+  shipped orders (`test_orders_flow.ShipmentBackfillTest`). `Shipment.objects.with_status(today)` annotates `status`
+  (returned > delivered (delivered_at or arrived/done) > no_tracking (untracked method and no code) > late (past
+  expected_by) > in_transit) and `problem` (late, or no_tracking past expected_by). `GET /api/shipments/?tab=
+  in_transit|delivered|problems|returned&market=&page=` (in_transit includes late and no_tracking), `kpis`
+  (`on_time_pct` one decimal string, over deliveries with a date in the last 30 days), paginated;
+  `PATCH shipments/<id>/` (carrier, tracking_code, postage_cost, note kept when absent; delivered/returned booleans).
+  `me.counts` adds `orders_to_pack` and `shipment_problems` (every market). No tracking provider yet.
 - **Account extras** (`accounts/`): login takes the username or a unique email (case-insensitive), `remember`
   false ends the session with the browser; password reset by email (`templates/accounts/`, link to the SPA's
   `/login/reset/<uid>/<token>/`); `AuditEvent` (`record(user, kind, request)`: sign-in ok/failed on a known account,

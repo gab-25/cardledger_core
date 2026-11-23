@@ -27,9 +27,11 @@ from .models import (
     MarketConnection,
     Order,
     OrderItem,
+    Shipment,
     SyncConflict,
     SyncLog,
 )
+from .shipping import carrier_for, expected_by
 
 CSV_FIELDS = ["name", "set", "condition", "language", "foil", "quantity", "number", "cost", "location"]
 
@@ -358,7 +360,32 @@ def save_order(owner, market, market_order_id, fields, lines):
         )
     if not order.stock_applied and _decrements_stock(order):
         _apply_stock(order)
+    record_shipment(order)
     return order, created
+
+
+def record_shipment(order):
+    """Create or update the Shipment of order once it is shipped (sent, arrived or done on its market); nothing
+    before. Created with shipped_at (the order's sent_at, else now), the order's tracking code, the carrier its
+    shipping method names and expected_by (shipping.expected_by); later calls fill only what is still blank (the
+    seller's edits stay) and set delivered_at the first time the order is seen arrived/done. Returns the shipment or
+    None."""
+    if order.state not in Order.SHIPPED_STATES:
+        return None
+    shipment = Shipment.objects.filter(order=order).first() or Shipment(order=order)
+    if shipment.shipped_at is None:
+        shipment.shipped_at = order.sent_at or timezone.now()
+    if order.tracking_code and not shipment.tracking_code:
+        shipment.tracking_code = order.tracking_code
+    if not shipment.carrier:
+        shipment.carrier = carrier_for(order.shipping_method)
+    if shipment.expected_by is None:
+        shipment.expected_by = expected_by(shipment.shipped_at, order.max_shipping_days,
+                                           order.tracked or bool(shipment.tracking_code))
+    if order.state in Order.DELIVERED_STATES and shipment.delivered_at is None and shipment.returned_at is None:
+        shipment.delivered_at = timezone.now()
+    shipment.save()
+    return shipment
 
 
 def diff_listings(user, market, remote):
@@ -421,3 +448,34 @@ def resolve_conflict(conflict, keep):
             f"({conflict.get_resolution_display().lower()})",
             owner=conflict.item.owner,
         )
+
+
+def assign_invoice_numbers(user, orders):
+    """Give each of user's orders (in this order) that has none the next invoice number of the user's business
+    details: invoice_prefix + invoice_next_number zero-padded to 4 digits (e.g. "CL-0042"), then incremented. The
+    business row is locked (select_for_update) so concurrent prints never share a number. Updates the orders in
+    place and returns them."""
+    from accounts.models import BusinessDetails
+
+    missing = [o.pk for o in orders if not o.invoice_number]
+    if not missing:
+        return orders
+    with transaction.atomic():
+        BusinessDetails.objects.get_or_create(user=user)
+        business = BusinessDetails.objects.select_for_update().get(user=user)
+        # re-read under the lock: another print may have numbered some meanwhile
+        current = dict(Order.objects.owned_by(user).select_for_update().filter(pk__in=missing)
+                       .values_list("pk", "invoice_number"))
+        number = business.invoice_next_number
+        for order in orders:
+            if order.pk not in current:
+                continue
+            if current[order.pk]:
+                order.invoice_number = current[order.pk]
+                continue
+            order.invoice_number = f"{business.invoice_prefix}{number:04d}"
+            Order.objects.filter(pk=order.pk).update(invoice_number=order.invoice_number)
+            number += 1
+        business.invoice_next_number = number
+        business.save(update_fields=["invoice_next_number"])
+    return orders

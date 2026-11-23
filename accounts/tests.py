@@ -26,7 +26,8 @@ class ProfileTest(TestCase):
         self.assertEqual(data["user"]["username"], "gab")
         self.assertEqual(data["user"]["full_name"], "")
         self.assertFalse(data["user"]["is_staff"])
-        self.assertEqual(data["counts"], {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0})
+        self.assertEqual(data["counts"], {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0,
+                                          "orders_to_pack": 0, "shipment_problems": 0})
         self.assertEqual(data["markets"], [
             {"code": "cm", "name": "Cardmarket", "connected": False, "status": "off", "last_sync": None, "handle": ""},
             {"code": "ct", "name": "CardTrader", "connected": False, "status": "off", "last_sync": None, "handle": ""},

@@ -26,14 +26,13 @@ def listing_badge(status):
 
 
 _S = Order.State
-# Shipments page tabs: key -> (label, states shown)
-ORDER_TABS = {
-    "to_ship": ("To ship", [_S.PAID]),
-    "ct_zero": ("CT Zero pending", [_S.HUB_PENDING]),
-    "shipped": ("Shipped", [_S.SENT]),
-    "completed": ("Completed", [_S.ARRIVED, _S.DONE]),
-    "issues": ("Issues", [_S.REQUEST_FOR_CANCEL, _S.CANCELED, _S.LOST]),
-}
+# Orders page tabs: key -> label (which orders: ledger/api/orders.py _TAB_FILTERS)
+ORDER_TABS = {"to_pack": "To pack", "packed": "Packed", "shipped": "Shipped", "issues": "Issues"}
+# Tab keys of the old Shipments page, still accepted for a while
+OLD_ORDER_TABS = {"to_ship": "to_pack", "ct_zero": "to_pack", "completed": "shipped"}
+
+# Shipments page tabs: key -> label
+SHIPMENT_TABS = {"in_transit": "In transit", "delivered": "Delivered", "problems": "Problems", "returned": "Returned"}
 
 _ORDER_TONES = {
     _S.PAID: "pending",

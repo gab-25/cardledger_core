@@ -12,7 +12,7 @@ from django.urls import reverse
 
 from .models import (
     ExtensionToken,
-    Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, SyncConflict, SyncLog,
+    Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, Shipment, SyncConflict, SyncLog,
 )
 from .tests import LedgerTestCase, game
 
@@ -126,7 +126,10 @@ class OwnerIsolationSweepTest(LedgerTestCase):
     # URL name → how to find one of self.user's objects for its argument
     TARGETS = {
         "api_item": lambda t: t.item.pk, "api_listing": lambda t: t.listing.item_id,
-        "api_order": lambda t: t.order.pk,
+        "api_order": lambda t: t.order.pk, "api_order_pack": lambda t: t.order.pk,
+        "api_order_unpack": lambda t: t.order.pk, "api_order_issue": lambda t: t.order.pk,
+        "api_order_item": lambda t: (t.order.pk, t.order.items.first().pk),
+        "api_shipment": lambda t: t.shipment.pk,
         "api_resolve": lambda t: t.conflict.pk, "api_extension_token": lambda t: t.ext_token.pk,
         "scan_api_session": lambda t: t.session.uuid, "scan_api_captures": lambda t: t.session.uuid,
         "scan_api_search": lambda t: t.session.uuid, "scan_api_manual": lambda t: t.session.uuid,
@@ -141,6 +144,7 @@ class OwnerIsolationSweepTest(LedgerTestCase):
         self.item = CollectionItem.objects.owned_by(self.user).first()
         self.listing = Listing.objects.owned_by(self.user).first()
         self.order = Order.objects.owned_by(self.user).filter(state=Order.State.PAID).first()
+        self.shipment = Shipment.objects.owned_by(self.user).first()
         self.conflict = SyncConflict.objects.owned_by(self.user).first()
         self.session = ScanSession.objects.create(owner=self.user, game=game())
         self.line = ScanLine.objects.create(session=self.session, condition="NM", frame=b"jpeg")
@@ -155,7 +159,8 @@ class OwnerIsolationSweepTest(LedgerTestCase):
 
     def test_other_users_objects_are_404(self):
         for name, target in self.TARGETS.items():
-            url = reverse(f"ledger:{name}", args=[target(self)])
+            arg = target(self)
+            url = reverse(f"ledger:{name}", args=arg if isinstance(arg, tuple) else [arg])
             for method in ("get", "post", "delete"):
                 with self.subTest(name=name, method=method):
                     self.assertIn(getattr(self.client, method)(url).status_code, (404, 405))
@@ -165,7 +170,8 @@ class OwnerIsolationSweepTest(LedgerTestCase):
 
     def test_some_method_answers_404_for_each_url(self):
         for name, target in self.TARGETS.items():
-            url = reverse(f"ledger:{name}", args=[target(self)])
+            arg = target(self)
+            url = reverse(f"ledger:{name}", args=arg if isinstance(arg, tuple) else [arg])
             statuses = {self.client.get(url).status_code, self.client.post(url).status_code,
                         self.client.put(url).status_code, self.client.patch(url).status_code}
             with self.subTest(name=name):
@@ -174,7 +180,7 @@ class OwnerIsolationSweepTest(LedgerTestCase):
     def test_list_pages_show_none_of_the_admins_cards(self):
         names = list(CollectionItem.objects.owned_by(self.user).values_list("card__name", flat=True))
         for name, params in (("api_collection", {}), ("api_listings", {}), ("api_catalog", {"owned": "1"}),
-                             ("api_sync", {}), ("api_orders", {})):
+                             ("api_sync", {}), ("api_orders", {}), ("api_shipments", {})):
             resp = self.client.get(reverse(f"ledger:{name}"), params)
             with self.subTest(page=name):
                 self.assertEqual(resp.status_code, 200)

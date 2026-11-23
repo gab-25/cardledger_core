@@ -343,5 +343,6 @@ def mark_shipped(user, market, market_order_id, tracking_code=""):
         order.sent_at = timezone.now()
         fields += ["state", "sent_at"]
     order.save(update_fields=fields)
+    services.record_shipment(order)
     services._log(f"{Market(market).label}: order #{order.code} shipped", owner=user)
     return order

@@ -140,6 +140,7 @@ def load_demo(owner):
                 "name": card_name, "expansion": expansion, "quantity": qty,
                 "price": Decimal(price), "condition": cond, "language": "EN",
             })
+        services.record_shipment(order)
 
     if not SyncLog.objects.filter(owner=owner).exists():
         SyncLog.objects.create(owner=owner, message="CardTrader: 6 listings published")
@@ -483,7 +484,8 @@ class CollectionIsolationTest(LedgerTestCase):
         self.assertEqual(data["results"], [])
         self.assertEqual(data["sets"], [])
         self.assertEqual(self.client.get(reverse("accounts:api_me")).json()["counts"],
-                         {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0})
+                         {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0,
+                          "orders_to_pack": 0, "shipment_problems": 0})
 
     def test_item_of_other_user_is_404(self):
         item = CollectionItem.objects.filter(owner=self.user).first()
@@ -692,18 +694,16 @@ class ShipmentsTest(LedgerTestCase):
                                 content_type="application/json")
         self.assertEqual(resp.status_code, 404)
 
-    def test_shipments_tabs(self):
+    def test_orders_tabs(self):
         data = self.client.get(reverse("ledger:api_orders")).json()
-        self.assertEqual(data["tab"], "to_ship")
-        self.assertEqual(len(data["results"]), 2)
+        self.assertEqual(data["tab"], "to_pack")
+        self.assertEqual(len(data["results"]), 3)  # the paid ones and the CT Zero pending one
         self.assertEqual(data["stats"]["items_to_ship"], 3)
-        self.assertEqual([t["key"] for t in data["tabs"]], ["to_ship", "ct_zero", "shipped", "completed", "issues"])
-        self.assertEqual(data["tabs"][0], {"key": "to_ship", "label": "To ship", "count": 2})
-        packing = [r["packing_number"] for r in data["results"]]
-        self.assertEqual(packing, sorted(packing, key=lambda n: (n is None, n)))
-        data = self.client.get(reverse("ledger:api_orders"), {"tab": "ct_zero"}).json()
-        self.assertEqual([r["badge"]["label"] for r in data["results"]], ["CT Zero pending"])
-        self.assertEqual(self.client.get(reverse("ledger:api_orders"), {"tab": "nope"}).json()["tab"], "to_ship")
+        self.assertEqual([t["key"] for t in data["tabs"]], ["to_pack", "packed", "shipped", "issues"])
+        self.assertEqual(data["tabs"][0], {"key": "to_pack", "label": "To pack", "count": 3})
+        data = self.client.get(reverse("ledger:api_orders"), {"tab": "ct_zero"}).json()  # an old key
+        self.assertEqual(data["tab"], "to_pack")
+        self.assertEqual(self.client.get(reverse("ledger:api_orders"), {"tab": "nope"}).json()["tab"], "to_pack")
 
     def test_order_detail(self):
         order = ct_order(self.user, 1, "paid", [(self.sheoldred.market_listing_id, "Sheoldred", 1)])

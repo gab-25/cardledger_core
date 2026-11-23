@@ -329,8 +329,39 @@ class SyncLog(models.Model):
         return self.message
 
 
+class OrderQuerySet(OwnedQuerySet):
+    owner_path = "owner"
+
+    def with_stage(self):
+        """Annotate stage, where the order is in the shop (see Order.Stage): the first that applies of issue (a note
+        by the seller, or a problem state on the market), shipped (sent/arrived/done; also closed: merged into the
+        CT Zero order that ships it, and canceled before payment: nothing to ship), packed, picking (some line
+        picked), to_pack."""
+        S = Order.State
+        issue = (~Q(issue_note="") | Q(state__in=[S.REQUEST_FOR_CANCEL, S.LOST])
+                 | Q(state=S.CANCELED, paid_at__isnull=False))
+        picked = OrderItem.objects.filter(order=models.OuterRef("pk"), picked=True)
+        return self.annotate(stage=models.Case(
+            models.When(issue, then=models.Value(Order.Stage.ISSUE)),
+            models.When(state__in=Order.DONE_STATES, then=models.Value(Order.Stage.SHIPPED)),
+            models.When(packed_at__isnull=False, then=models.Value(Order.Stage.PACKED)),
+            models.When(models.Exists(picked), then=models.Value(Order.Stage.PICKING)),
+            default=models.Value(Order.Stage.TO_PACK),
+            output_field=models.CharField(),
+        ))
+
+
 class Order(models.Model):
     """A sale order on a market (you are the seller)."""
+
+    class Stage(models.TextChoices):
+        """Where the order is in the shop (computed: OrderQuerySet.with_stage)."""
+
+        TO_PACK = "to_pack", "To pack"
+        PICKING = "picking", "Picking"
+        PACKED = "packed", "Packed"
+        SHIPPED = "shipped", "Shipped"
+        ISSUE = "issue", "Issue"
 
     class State(models.TextChoices):
         HUB_PENDING = "hub_pending", "CT Zero pending"
@@ -342,6 +373,12 @@ class Order(models.Model):
         CANCELED = "canceled", "Canceled"
         LOST = "lost", "Lost"
         CLOSED = "closed", "Merged (CT Zero)"
+
+    # Left the shop (shipped) on the market
+    SHIPPED_STATES = (State.SENT, State.ARRIVED, State.DONE)
+    DELIVERED_STATES = (State.ARRIVED, State.DONE)
+    # Nothing left to pack: shipped, merged into the CT Zero order, or canceled (an issue only when it was paid)
+    DONE_STATES = (*SHIPPED_STATES, State.CLOSED, State.CANCELED)
 
     owner = _owner("orders")
     market = models.CharField(max_length=2, choices=Market.choices, default=Market.CARDTRADER)
@@ -379,10 +416,14 @@ class Order(models.Model):
     stock_applied = models.BooleanField(
         default=False, help_text="Sold quantities already removed from the Ledger"
     )
+    packed_at = models.DateTimeField(null=True, blank=True, help_text="When the seller packed it")
+    issue_note = models.TextField(blank=True, help_text="A problem noted by the seller")
+    issue_at = models.DateTimeField(null=True, blank=True)
+    invoice_number = models.CharField(max_length=40, blank=True, help_text="Given when its packing slip is printed")
     raw = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    objects = owned_manager("owner")
+    objects = OrderQuerySet.as_manager()
 
     class Meta:
         ordering = ["-paid_at", "-id"]
@@ -432,6 +473,7 @@ class OrderItem(models.Model):
     condition = models.CharField(max_length=40, blank=True)
     language = models.CharField(max_length=10, blank=True)
     foil = models.BooleanField(default=False)
+    picked = models.BooleanField(default=False, help_text="Taken from its storage location for packing")
 
     objects = owned_manager("order__owner")
 
@@ -442,6 +484,63 @@ class OrderItem(models.Model):
 
     def __str__(self):
         return f"{self.quantity}× {self.name}"
+
+
+class ShipmentQuerySet(OwnedQuerySet):
+    owner_path = "order__owner"
+
+    def with_status(self, today):
+        """Annotate status (Shipment.Status) as of the date today: returned (marked by the seller), delivered
+        (delivered_at, or arrived/done on the market), no_tracking (untracked method and no code), late (past
+        expected_by), in_transit; and problem: late, or no_tracking past expected_by."""
+        St = Shipment.Status
+        return self.annotate(status=models.Case(
+            models.When(returned_at__isnull=False, then=models.Value(St.RETURNED)),
+            models.When(Q(delivered_at__isnull=False) | Q(order__state__in=Order.DELIVERED_STATES),
+                        then=models.Value(St.DELIVERED)),
+            models.When(order__tracked=False, tracking_code="", then=models.Value(St.NO_TRACKING)),
+            models.When(expected_by__lt=today, then=models.Value(St.LATE)),
+            default=models.Value(St.IN_TRANSIT),
+            output_field=models.CharField(),
+        )).annotate(problem=models.Case(
+            models.When(Q(status=St.LATE) | Q(status=St.NO_TRACKING, expected_by__lt=today), then=True),
+            default=False, output_field=models.BooleanField(),
+        ))
+
+
+class Shipment(models.Model):
+    """The parcel of a shipped order (one per order), created when the order becomes sent: by an extension report
+    or POST /api/extension/shipped/ (services.record_shipment). No tracking provider: its status comes from the dates,
+    the market state and what the seller marks (status is computed: ShipmentQuerySet.with_status)."""
+
+    class Status(models.TextChoices):
+        IN_TRANSIT = "in_transit", "In transit"
+        DELIVERED = "delivered", "Delivered"
+        LATE = "late", "Late"
+        NO_TRACKING = "no_tracking", "No tracking"
+        RETURNED = "returned", "Returned"
+
+    order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name="shipment")
+    carrier = models.CharField(max_length=80, blank=True)
+    tracking_code = models.CharField(max_length=120, blank=True)
+    shipped_at = models.DateTimeField(null=True, blank=True)
+    expected_by = models.DateField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    returned_at = models.DateTimeField(null=True, blank=True)
+    postage_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    note = models.TextField(blank=True)
+
+    objects = ShipmentQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["-shipped_at", "-id"]
+
+    def __str__(self):
+        return f"Shipment of {self.order}"
+
+    @property
+    def tracked(self):
+        return self.order.tracked or bool(self.tracking_code)
 
 
 class Expansion(models.Model):

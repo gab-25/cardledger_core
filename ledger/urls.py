@@ -7,6 +7,7 @@ from .api import games as games_api
 from .api import orders as orders_api
 from .api import overview as overview_api
 from .api import sale as sale_api
+from .api import shipments as shipments_api
 from .api import scan as scan_api
 from .api import sync as sync_api
 
@@ -28,7 +29,15 @@ urlpatterns = [
     path("api/catalog/report-missing/", catalog_api.report_missing, name="api_catalog_report_missing"),
     path("api/overview/", overview_api.overview, name="api_overview"),
     path("api/orders/", orders_api.orders, name="api_orders"),
+    path("api/orders/pick-list/", orders_api.pick_list, name="api_orders_pick_list"),
+    path("api/orders/slips/", orders_api.slips, name="api_orders_slips"),
     path("api/orders/<int:pk>/", orders_api.order, name="api_order"),
+    path("api/orders/<int:pk>/items/<int:item_pk>/", orders_api.order_item, name="api_order_item"),
+    path("api/orders/<int:pk>/pack/", orders_api.pack, name="api_order_pack"),
+    path("api/orders/<int:pk>/unpack/", orders_api.unpack, name="api_order_unpack"),
+    path("api/orders/<int:pk>/issue/", orders_api.issue, name="api_order_issue"),
+    path("api/shipments/", shipments_api.shipments, name="api_shipments"),
+    path("api/shipments/<int:pk>/", shipments_api.shipment, name="api_shipment"),
     path("api/sync/", sync_api.sync, name="api_sync"),
     path("api/sync/conflicts/<int:pk>/resolve/", sync_api.resolve, name="api_resolve"),
     path("api/extension/pair/", extension_api.pair, name="api_extension_pair"),

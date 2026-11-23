@@ -841,6 +841,11 @@ class SchemaTest(LedgerTestCase):
         self.assertEqual(query("/api/overview/"), {"game"})
         self.assertEqual(query("/api/listings/"), {"status", "game", "market"})
         self.assertEqual(query("/api/orders/"), {"tab", "market"})
+        self.assertEqual(query("/api/orders/pick-list/"), {"ids"})
+        self.assertEqual(query("/api/shipments/"), {"tab", "market", "page"})
+        self.assertEqual(body("/api/shipments/{id}/", "patch")["application/json"],
+                         {"carrier", "tracking_code", "postage_cost", "note", "delivered", "returned"})
+        self.assertEqual(body("/api/orders/{id}/items/{item_pk}/", "patch")["application/json"], {"picked"})
         self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "game", "category", "owned", "rarity", "finish",
                                                   "ordering", "page"})
         self.assertEqual(query("/api/catalog/categories/"), {"game"})

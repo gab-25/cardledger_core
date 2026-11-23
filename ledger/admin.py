@@ -1,7 +1,8 @@
 from django.contrib import admin
 
 from .models import (Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion, Game, Listing,
-                     MarketConnection, ExtensionToken, MissingCardReport, Order, OrderItem, SyncConflict, SyncLog)
+                     MarketConnection, ExtensionToken, MissingCardReport, Order, OrderItem, Shipment, SyncConflict,
+                     SyncLog)
 
 
 @admin.register(Card)
@@ -53,6 +54,14 @@ class OrderAdmin(admin.ModelAdmin):
     search_fields = ["code", "buyer_username", "ship_name"]
     inlines = [OrderItemInline]
     readonly_fields = ["raw"]
+
+
+@admin.register(Shipment)
+class ShipmentAdmin(admin.ModelAdmin):
+    list_display = ["order", "carrier", "tracking_code", "shipped_at", "expected_by", "delivered_at", "returned_at"]
+    list_filter = ["order__market", "carrier"]
+    raw_id_fields = ["order"]
+    search_fields = ["order__code", "tracking_code"]
 
 
 @admin.register(Game)

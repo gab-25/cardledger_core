@@ -22,6 +22,8 @@ from rest_framework.response import Response
 from ledger import services as ledger_services
 from ledger.api.common import (GAME, doc, form_body, form_errors, form_fields, game_param, messages_response,
                                msg)
+from ledger.api.orders import to_pack_count
+from ledger.api.shipments import problem_count
 from ledger.extension import extension_state
 from ledger.models import CardmarketPrice, CollectionItem, Listing, Order
 
@@ -48,7 +50,8 @@ def _user(user):
 
 
 @doc(TAGS, "The logged-in user, the sidebar counters (?game limits pending_changes, copies and live_listings to a "
-           "game), the marketplaces' state (Cardmarket and CardTrader, with the seller handle), whether the browser "
+           "game; orders_to_pack: to pack or being picked, shipment_problems: late or untracked past their expected "
+           "date, both of every market), the marketplaces' state (Cardmarket and CardTrader, with the seller handle), whether the browser "
            "extension is paired (and when it was last seen) and the date of the latest Cardmarket price guide. "
            "Each market's status is its connection's (both are synced by the extension): off until the extension is "
            "paired, never (never synced), ok, error (the last sync failed)",
@@ -71,6 +74,8 @@ def me(request):
             "orders_to_ship": Order.objects.owned_by(user).filter(state=Order.State.PAID).count(),
             "copies": items.aggregate(n=Sum("quantity"))["n"] or 0,
             "live_listings": live.count(),
+            "orders_to_pack": to_pack_count(user),
+            "shipment_problems": problem_count(user),
         },
         "markets": ledger_services.market_states(user),
         "extension": extension_state(user),
@@ -202,7 +207,8 @@ def password(request):
     return messages_response(msg("success", "Password changed."))
 
 
-def _business(user):
+def business_data(user):
+    """The business details as GET /api/account/business/ answers them (also the packing slips' header)."""
     profile, business = profile_of(user), business_of(user)
     data = {"shop_name": profile.shop_name, "vat_number": profile.vat_number}
     data.update({name: getattr(business, name) for name in BusinessForm.Meta.fields})
@@ -217,7 +223,7 @@ def _business(user):
 def business(request):
     user = request.user
     if request.method == "GET":
-        return Response(_business(user))
+        return Response(business_data(user))
     form = BusinessForm(request.data, instance=business_of(user))
     profile = BusinessProfileForm(request.data, instance=profile_of(user))
     valid = form.is_valid()
