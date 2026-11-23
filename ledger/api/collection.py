@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from datetime import timedelta
 
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, OuterRef, Q, Subquery, Sum
 from django.db.models.functions import Now
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -22,7 +22,7 @@ from accounts.models import seller_settings_of
 from .. import services
 from ..cardmarket import blueprint_value, trend_price
 from ..forms import BulkForm, CatalogItemForm, CsvImportForm, ItemForm
-from ..models import Card, Category, CollectionItem, Condition, Language, Listing, SyncLog
+from ..models import Card, Category, CollectionItem, Condition, Language, Listing, Market, SyncLog
 from ..presentation import item_badge
 from .common import GAME, PAGE, doc, form_body, form_errors, game_param, messages_response, msg, page_payload, query
 
@@ -37,20 +37,21 @@ BULK = form_body("CollectionBulk", BulkForm, ids=serializers.ListField(
 STALE_DAYS = 90
 BULK_UNDER = Decimal("0.50")  # trend under which an item is bulk
 BELOW_TREND = Decimal("0.95")  # a listing price more than 5% under the trend
-ACTIVE = [Listing.Status.PUBLISHED, Listing.Status.TO_PUBLISH]  # a listing not sold
+ACTIVE = [Listing.Status.PUBLISHED, Listing.Status.TO_PUBLISH, Listing.Status.PAUSED,
+          Listing.Status.ERROR]  # a listing not sold (nor removed: pending_delete)
 VIEWS = ["all", "below_trend", "not_listed", "stale", "bulk"]
 
 
 def _views():
-    """The collection views (?view): Q filters on items annotated with trend (None: every item).
+    """The collection views (?view): Q filters on items annotated with trend and listed_min (None: every item).
 
-    A "listing" here is an active one (published or to publish): a sold listing counts as no listing.
+    A "listing" here is an active one on any market (not sold, not removed): a sold listing counts as no listing.
     """
     stale_before = timezone.now() - timedelta(days=STALE_DAYS)
     return {
         "all": None,
-        "below_trend": Q(listing__status__in=ACTIVE, listing__price__lt=F("trend") * BELOW_TREND),
-        "not_listed": Q(listing__isnull=True) | Q(listing__status=Listing.Status.SOLD),
+        "below_trend": Q(listed_min__lt=F("trend") * BELOW_TREND),
+        "not_listed": Q(listed_min__isnull=True),
         "stale": Q(created_at__lt=stale_before, quantity__gt=0),
         "bulk": Q(trend__lt=BULK_UNDER),
     }
@@ -65,9 +66,15 @@ def _price(item):
 
 
 def _listing_price(item):
-    """The price of the item's active listing, None without one (or when it is sold)."""
-    listing = getattr(item, "listing", None)
-    return _money(listing.price) if listing is not None and listing.status in ACTIVE else None
+    """The lowest price of the item's active listings (any market), None without one."""
+    prices = [l.price for l in item.active_listings()]
+    return _money(min(prices)) if prices else None
+
+
+def _listings(item):
+    """The item's active listings, one per market: [{market, status, price}]."""
+    return [{"market": l.market, "status": l.status, "price": _money(l.price)}
+            for l in sorted(item.active_listings(), key=lambda l: l.market)]
 
 
 def _with_blueprint(items):
@@ -75,7 +82,10 @@ def _with_blueprint(items):
                           category_name=blueprint_value("category__name"),
                           image_url=blueprint_value("image_url"),
                           image_large_url=blueprint_value("image_large_url"),
-                          trend=trend_price())
+                          trend=trend_price(),
+                          listed_min=Subquery(  # lowest price of the active listings (any market), None without
+                              Listing.objects.filter(item=OuterRef("pk"), status__in=ACTIVE, pending_delete=False)
+                              .order_by("price").values("price")[:1]))
 
 
 def _category(value):
@@ -121,6 +131,7 @@ def _row(item):
         "cost": _money(item.cost),
         "location": item.location,
         "listing_price": _listing_price(item),
+        "listings": _listings(item),
         "added_at": item.created_at,
     }
 
@@ -131,14 +142,15 @@ def _collection(request):
     game = game_param(params)
     views = _views()
     items = _with_blueprint(CollectionItem.objects.owned_by(user).filter(card__game=game)
-                            .select_related("card", "listing"))
+                            .select_related("card").prefetch_related("listings"))
     counts = {f"{name}_n": Count("pk", filter=views[name]) for name in ("below_trend", "not_listed", "stale")}
     stats = items.aggregate(total=Sum("quantity"), value=Sum(VALUE), cost_value=Sum(COST_VALUE), **counts)
     for name in ("below_trend", "not_listed", "stale"):
         stats[name] = stats.pop(f"{name}_n")
     stats["unique"] = Card.objects.filter(items__owner=user, game=game).distinct().count()
     stats["for_sale"] = (
-        Listing.objects.owned_by(user).filter(item__card__game=game).exclude(status=Listing.Status.SOLD)
+        Listing.objects.owned_by(user).filter(item__card__game=game, pending_delete=False)
+        .exclude(status=Listing.Status.SOLD)
         .aggregate(n=Sum("quantity"))["n"] or 0
     )
     stats["value"] = _money(stats["value"])
@@ -248,7 +260,7 @@ def item(request, pk):
         "foil": obj.foil,
         "quantity": obj.quantity,
         "price": _price(obj),
-        "has_listing": hasattr(obj, "listing"),
+        "has_listing": obj.listings.filter(pending_delete=False).exists(),
         "cost": _money(obj.cost),
         "location": obj.location,
     })
@@ -264,7 +276,7 @@ def _pct(pct):
 
 @doc(TAGS, "Act on several items of the game of ?game: set_location (location), delete, list (create or update a "
            "listing to publish at trend × (1 + pct/100), rounded to the seller's price_rounding, default 0.05) or "
-           "reprice (the same, existing listings only); with the seller's hold_below_cost, an item whose new price "
+           "reprice (the same, existing listings only), on markets (default [\"ct\"]); with the seller's hold_below_cost, an item whose new price "
            "would be under its cost is skipped", request=BULK, parameters=[GAME])
 @api_view(["POST"])
 def bulk(request):
@@ -295,7 +307,8 @@ def bulk(request):
     seller = seller_settings_of(request.user)
     result = services.list_at_trend(items.annotate(trend=trend_price()), pct, reprice=action == "reprice",
                                     step=Decimal(seller.price_rounding) if seller.price_rounding else None,
-                                    hold_below_cost=seller.hold_below_cost)
+                                    hold_below_cost=seller.hold_below_cost,
+                                    markets=data.get("markets") or [Market.CARDTRADER])
     verb = "Repriced" if action == "reprice" else "Listed"
     msgs = [msg("success", f"{verb} {_plural(result.listed, 'item')} at {_pct(pct)}.")]
     if result.no_trend:

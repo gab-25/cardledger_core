@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from .. import services
 from ..cardtrader import CardTraderError
 from ..forms import ShipForm
-from ..models import Order
+from ..models import Market, Order
 from ..presentation import ORDER_TABS, order_badge
 from .common import doc, form_body, messages_response, msg, query
 from .errors import Blocked, ServiceError
@@ -29,9 +29,12 @@ def _row(order):
     return {
         "id": order.pk,
         "code": order.code,
+        "market": order.market,
+        "market_order_id": order.market_order_id,
         "packing_number": order.packing_number,
         "can_ship": order.can_ship,
         "buyer_username": order.buyer_username,
+        "buyer_name": order.buyer_name,
         "via_cardtrader_zero": order.via_cardtrader_zero,
         "ship_city": order.ship_city,
         "ship_country_code": order.ship_country_code,
@@ -41,18 +44,30 @@ def _row(order):
         "sent_at": order.sent_at,
         "paid_at": order.paid_at,
         "total": _money(order.total),
+        "items_total": _money(order.items_total),
+        "shipping_cost": _money(order.shipping_cost),
+        "market_fee": _money(order.market_fee),
+        "net": _money(order.net),
+        "currency": order.currency,
         "badge": order_badge(order.state),
     }
 
 
-@doc(TAGS, "Orders of one tab (?tab: to_ship, ct_zero, shipped, completed, issues) with the shipping stats",
-     parameters=[query("tab", "The tab (default: to_ship)", enum=list(ORDER_TABS))])
+@doc(TAGS, "Orders of one tab (?tab: to_ship, ct_zero, shipped, completed, issues; ?market: one market's) with "
+           "the shipping stats (of the market filtered)",
+     parameters=[query("tab", "The tab (default: to_ship)", enum=list(ORDER_TABS)),
+                 query("market", "Only this market's orders (cm, ct)", enum=Market.values)])
 @api_view(["GET"])
 def orders(request):
     tab = request.query_params.get("tab", "to_ship")
     if tab not in ORDER_TABS:
         tab = "to_ship"
     qs = Order.objects.owned_by(request.user).prefetch_related("items")
+    market = request.query_params.get("market", "")
+    if market in Market.values:
+        qs = qs.filter(market=market)
+    else:
+        market = ""
     month_start = timezone.localtime().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     to_ship = qs.filter(state=Order.State.PAID)
     stats = {
@@ -71,6 +86,7 @@ def orders(request):
         shown = shown.order_by("packing_number", "paid_at")
     return Response({
         "tab": tab,
+        "market": market,
         "stats": stats,
         "tabs": tabs,
         "orders_synced_at": services.get_cardtrader(request.user).orders_synced_at,
@@ -131,6 +147,8 @@ def ship(request, pk):
         if request.data.get("save_tracking"):
             services.save_tracking_code(obj, tracking_code)
             return messages_response(msg("success", "Tracking code saved on CardTrader."), shipped=False)
+        if obj.market != Market.CARDTRADER:
+            raise Blocked(services.NOT_CARDTRADER)
         if not obj.can_ship:
             raise Blocked(f"Order #{obj.code} is {obj.state_label.lower()}: it cannot be shipped.")
         services.ship_order(obj, tracking_code)

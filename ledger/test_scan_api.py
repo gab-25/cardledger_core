@@ -826,7 +826,7 @@ class SchemaTest(LedgerTestCase):
             return {kind: set(components[c["schema"]["$ref"].rsplit("/", 1)[1]]["properties"])
                     for kind, c in content.items()}
 
-        listing = set(ListingForm.base_fields)
+        listing = set(ListingForm.base_fields) | {"market"}
         self.assertEqual(body("/api/collection/", "post")["application/json"], set(CatalogItemForm.base_fields))
         self.assertEqual(body("/api/collection/{id}/", "put")["application/json"], set(ItemForm.base_fields))
         self.assertIn("blueprint", CatalogItemForm.base_fields)
@@ -837,7 +837,8 @@ class SchemaTest(LedgerTestCase):
         self.assertEqual(body("/api/sync/conflicts/{id}/resolve/", "post")["application/json"], {"keep"})
         self.assertEqual(body("/api/account/profile/", "put")["application/json"], {"first_name", "last_name", "email",
                                                                          "shop_name", "vat_number"})
-        self.assertEqual(body("/api/collection/bulk/", "post")["application/json"], {"ids", "action", "location", "pct"})
+        self.assertEqual(body("/api/collection/bulk/", "post")["application/json"], {"ids", "action", "location", "pct",
+                                                                                     "markets"})
         self.assertEqual(body("/api/account/password/", "post")["application/json"],
                          {"old_password", "new_password1", "new_password2"})
         self.assertEqual(body("/api/account/cardtrader-token/", "put")["application/json"], {"token"})
@@ -851,8 +852,8 @@ class SchemaTest(LedgerTestCase):
         self.assertEqual(query("/api/collection/"), {"q", "foil", "set", "cond", "category", "location",
                                                        "view", "game", "page"})
         self.assertEqual(query("/api/overview/"), {"game"})
-        self.assertEqual(query("/api/listings/"), {"status", "game"})
-        self.assertEqual(query("/api/orders/"), {"tab"})
+        self.assertEqual(query("/api/listings/"), {"status", "game", "market"})
+        self.assertEqual(query("/api/orders/"), {"tab", "market"})
         self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "game", "category", "owned", "rarity", "finish",
                                                   "ordering", "page"})
         self.assertEqual(query("/api/catalog/categories/"), {"game"})

@@ -270,10 +270,10 @@ class OverviewTest(DealerTestCase):
         order = self.order(1, 2, Decimal("50.00"))
         for i, (item, price, qty) in enumerate([(sheoldred, "20.00", 2), (counterspell, "5.00", 1)]):
             listing = Listing.objects.create(item=item, price=Decimal(price), quantity=1)
-            OrderItem.objects.create(order=order, ct_id=i, listing=listing, name=item.card.name,
+            OrderItem.objects.create(order=order, market_item_id=i, listing=listing, name=item.card.name,
                                      price=Decimal(price), quantity=qty)
         old = self.order(2, 45, Decimal("20.00"))
-        OrderItem.objects.create(order=old, ct_id=9, listing=sheoldred.listing, name="x", price=Decimal("20.00"))
+        OrderItem.objects.create(order=old, market_item_id=9, listing=sheoldred.listing_for(), name="x", price=Decimal("20.00"))
         self.assertEqual(self.overview()["gross_profit_30d"], "16.00")
 
     def test_stock_by_game(self):
@@ -323,8 +323,8 @@ class PackingOrderTest(LedgerTestCase):
                                                     (items[2], "", "Beta")]):
             CollectionItem.objects.filter(pk=item.pk).update(location=location)
             listing, _ = Listing.objects.get_or_create(item=item, defaults={"price": Decimal("1.00")})
-            OrderItem.objects.create(order=order, ct_id=100 + i, listing=listing, name=name)
-        OrderItem.objects.create(order=order, ct_id=200, name="Aardvark")  # not linked
+            OrderItem.objects.create(order=order, market_item_id=100 + i, listing=listing, name=name)
+        OrderItem.objects.create(order=order, market_item_id=200, name="Aardvark")  # not linked
         data = self.client.get(reverse("ledger:api_order", args=[order.pk])).json()
         self.assertEqual([(l["name"], l["location"]) for l in data["items"]],
                          [("Zeta", "A1"), ("Alpha", "B2"), ("Aardvark", ""), ("Beta", "")])

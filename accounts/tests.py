@@ -34,8 +34,11 @@ class ProfileTest(TestCase):
         self.assertEqual(data["user"]["full_name"], "")
         self.assertFalse(data["user"]["is_staff"])
         self.assertEqual(data["counts"], {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0})
-        self.assertEqual(data["markets"], [{"code": "ct", "name": "CardTrader", "connected": False, "status": "off",
-                                            "last_sync": None}])
+        self.assertEqual(data["markets"], [
+            {"code": "cm", "name": "Cardmarket", "connected": False, "status": "off", "last_sync": None, "handle": ""},
+            {"code": "ct", "name": "CardTrader", "connected": False, "status": "off", "last_sync": None, "handle": ""},
+        ])
+        self.assertEqual(data["extension"], {"paired": False, "last_seen_at": None})
         self.assertIsNone(data["prices_updated_at"])
 
     def test_pending_changes_per_game(self):

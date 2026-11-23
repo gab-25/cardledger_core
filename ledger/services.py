@@ -1,4 +1,4 @@
-"""Business operations: CSV import/export and CardTrader sync."""
+"""Business operations: CSV import/export, CardTrader sync, market connections, shared stock and orders."""
 
 import csv
 import io
@@ -32,6 +32,8 @@ from .models import (
     Game,
     Language,
     Listing,
+    Market,
+    MarketConnection,
     Order,
     OrderItem,
     SyncConflict,
@@ -50,6 +52,62 @@ def get_cardtrader(user):
         defaults={"description": "Sale listings and orders", "direction": "Ledger ⇄ CardTrader (API)"},
     )
     return service
+
+
+def connection(user, market):
+    """The user's MarketConnection on market, created (never synced) when missing."""
+    return MarketConnection.objects.get_or_create(user=user, market=market)[0]
+
+
+def mark_synced(user, market, error="", when=None):
+    """Record a sync (or publish) of market: ok, or error with its message."""
+    conn = connection(user, market)
+    conn.last_sync = when or timezone.now()
+    conn.status = MarketConnection.Status.ERROR if error else MarketConnection.Status.OK
+    conn.last_error = error[:300]
+    conn.save(update_fields=["last_sync", "status", "last_error"])
+    return conn
+
+
+def mark_failed(user, market, error):
+    """Record a failed sync or publish of market (its last sync time stays)."""
+    conn = connection(user, market)
+    conn.status, conn.last_error = MarketConnection.Status.ERROR, str(error)[:300]
+    conn.save(update_fields=["status", "last_error"])
+
+
+def market_states(user):
+    """me's markets: [{code, name, connected, status, last_sync, handle}] for Cardmarket and CardTrader.
+
+    CardTrader keeps the rule it always had: off without a saved token, never before any sync or publish, error when
+    the user's latest "CardTrader:" log entry is an error, else ok. Cardmarket (synced by the extension only) is its
+    MarketConnection: off until a pairing or a report creates it, then its stored status.
+    """
+    conns = {c.market: c for c in MarketConnection.objects.filter(user=user)}
+    states = []
+    for market in (Market.CARDMARKET, Market.CARDTRADER):
+        conn = conns.get(market)
+        handle = conn.handle if conn else ""
+        if market == Market.CARDTRADER:
+            service = SyncService.objects.filter(user=user, name=CARDTRADER).first()
+            connected = bool(service and service.api_token)
+            times = [t for t in (service and service.last_sync, conn and conn.last_sync) if t]
+            last_sync = max(times) if times else None
+            if not connected:
+                status = MarketConnection.Status.OFF
+            elif last_sync is None:
+                status = MarketConnection.Status.NEVER
+            else:
+                latest = (SyncLog.objects.filter(owner=user, message__startswith=f"{CARDTRADER}:")
+                          .values_list("level", flat=True).first())
+                status = MarketConnection.Status.ERROR if latest == SyncLog.Level.ERROR else MarketConnection.Status.OK
+        else:
+            status = conn.status if conn else MarketConnection.Status.OFF
+            connected = status != MarketConnection.Status.OFF
+            last_sync = conn.last_sync if conn else None
+        states.append({"code": market, "name": Market(market).label, "connected": connected, "status": status,
+                       "last_sync": last_sync, "handle": handle})
+    return states
 
 
 def user_token(user):
@@ -106,6 +164,10 @@ def set_api_token(user, token):
     service.api_token = token
     service.ct_user_id = ct_user_id
     service.save(update_fields=["api_token", "ct_user_id"])
+    conn = connection(user, Market.CARDTRADER)
+    conn.status = MarketConnection.Status.NEVER if service.last_sync is None else MarketConnection.Status.OK
+    conn.last_error = ""
+    conn.save(update_fields=["status", "last_error"])
     _log(f"{CARDTRADER}: API token connected" + (f" (app {info['name']})" if info.get("name") else ""), owner=user)
     return info
 
@@ -115,6 +177,7 @@ def remove_api_token(user):
     service.api_token = ""
     service.ct_user_id = None
     service.save(update_fields=["api_token", "ct_user_id"])
+    MarketConnection.objects.filter(user=user, market=Market.CARDTRADER).update(status=MarketConnection.Status.OFF)
     _log(f"{CARDTRADER}: API token removed", SyncLog.Level.WARNING, owner=user)
 
 
@@ -528,33 +591,56 @@ def _push_listings(user, listings, result):
             outcomes = call([product_payload(l, accepted[l.pk]) for l in batch])
             for listing, outcome in zip(batch, outcomes):
                 if outcome.get("result") in ("ok", "warning") and outcome.get("product_id"):
-                    listing.ct_product_id = outcome["product_id"]
+                    listing.market_listing_id = str(outcome["product_id"])
                     listing.status = Listing.Status.PUBLISHED
-                    listing.save(update_fields=["ct_product_id", "status", "updated_at"])
+                    listing.error_message = ""
+                    listing.listed_at = listing.listed_at or timezone.now()
+                    listing.save(update_fields=["market_listing_id", "status", "error_message", "listed_at",
+                                                "updated_at"])
                     result.published += 1
                 else:
                     result.failed.append((listing, _job_error(outcome)))
 
 
+def _delete_removed(user, listings):
+    """Delete on CardTrader the listings the user removed (pending_delete), then here."""
+    with user_client(user) as client:
+        for listing in listings:
+            try:
+                client.delete_product(listing.ct_product_id)
+            except CardTraderError as exc:
+                if exc.status != 404:  # already gone remotely: fine
+                    raise
+            listing.delete()
+
+
 def publish_pending(user, game=None):
-    """Push the listings of the user waiting to be published (of one game, or of all) to their CardTrader account."""
+    """Push the user's CardTrader listings waiting to be published (of one game, or of all) to their CardTrader
+    account, and delete there the ones they removed. Cardmarket listings are pushed by the extension only."""
     service = get_cardtrader(user)
-    pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
+    mine = Listing.objects.owned_by(user).filter(market=Market.CARDTRADER)
     if game is not None:
-        pending = pending.filter(item__card__game=game)
+        mine = mine.filter(item__card__game=game)
+    pending = mine.filter(status=Listing.Status.TO_PUBLISH, pending_delete=False)
     listings = list(pending.select_related("item__card__game"))
+    removed = list(mine.filter(pending_delete=True).exclude(market_listing_id=""))
     result = PublishResult()
-    if not listings:
+    if not listings and not removed:
         return result
 
     try:
-        _push_listings(user, listings, result)
+        if removed:
+            _delete_removed(user, removed)
+        if listings:
+            _push_listings(user, listings, result)
     except CardTraderError as exc:
         _log(f"{CARDTRADER}: publish failed ({exc})", SyncLog.Level.ERROR, owner=user)
+        mark_failed(user, Market.CARDTRADER, exc)
         raise
 
     service.last_sync = timezone.now()
     service.save(update_fields=["last_sync"])
+    mark_synced(user, Market.CARDTRADER, when=service.last_sync)
     _log(f"{CARDTRADER}: {result.published} listings published", owner=user)
     for listing, reason in result.failed:
         _log(f"{CARDTRADER}: {listing.item.card.name} not published ({reason})", SyncLog.Level.WARNING, owner=user)
@@ -581,50 +667,72 @@ class BulkListResult:
     below_cost: int = 0  # skipped (hold_below_cost): the new price would be under the item's cost
 
 
-def list_at_trend(items, pct, reprice=False, step=None, hold_below_cost=False):
-    """Put items on sale at price_over_trend(their trend, pct, step), as listings to publish.
+def list_at_trend(items, pct, reprice=False, step=None, hold_below_cost=False, markets=(Market.CARDTRADER,)):
+    """Put items on sale on markets at price_over_trend(their trend, pct, step), as listings to publish.
 
     With hold_below_cost an item whose new price would be under its cost is skipped (left as it is).
 
-    items must carry the `trend` annotation (cardmarket.trend_price()). list (reprice=False) creates the listing of
-    an item without one (all its copies) and reprices an existing one; a sold listing is reopened as a new product.
-    reprice changes only the active (not sold) listings. A published listing whose price changes goes back to
-    "to publish", like an edit of the listing form, so the next publish updates it on CardTrader.
+    items must carry the `trend` annotation (cardmarket.trend_price()). list (reprice=False) creates, on each market,
+    the listing of an item without one (all its copies) and reprices an existing one; a sold (or removed) listing is
+    reopened. reprice changes only the active listings. A published listing whose price changes goes back to "to
+    publish", like an edit of the listing form, so the next sync updates it on its market. Counts are per item.
     """
     result = BulkListResult()
-    for item in items.select_related("listing"):
-        listing = getattr(item, "listing", None)
-        active = listing is not None and listing.status != Listing.Status.SOLD
+    for item in items.prefetch_related("listings"):
+        listings = {m: item.listing_for(m) for m in markets}
+        active = {m for m, l in listings.items() if l is not None and l.is_active}
         if reprice and not active:
             result.no_listing += 1
             continue
         if item.trend is None:
             result.no_trend += 1
             continue
-        if not active and item.quantity < 1:
+        targets = active if reprice else set(markets)
+        if not reprice and item.quantity < 1:
+            targets = active
+        if not targets:
             result.no_copies += 1
             continue
         price = price_over_trend(item.trend, pct, step)
         if hold_below_cost and item.cost is not None and price < item.cost:
             result.below_cost += 1
             continue
-        if listing is None:
-            Listing.objects.create(item=item, price=price, quantity=item.quantity, status=Listing.Status.TO_PUBLISH)
-        elif not active:  # sold out on CardTrader: a new product
-            listing.price, listing.quantity, listing.status = price, item.quantity, Listing.Status.TO_PUBLISH
-            listing.ct_product_id = listing.sold_at = None
-            listing.save()
-        elif listing.price != price:
-            listing.price, listing.status = price, Listing.Status.TO_PUBLISH
-            listing.save(update_fields=["price", "status", "updated_at"])
+        for market in sorted(targets):
+            listing = listings[market]
+            if listing is None:
+                Listing.objects.create(item=item, market=market, price=price, quantity=item.quantity,
+                                       status=Listing.Status.TO_PUBLISH)
+            elif listing.status == Listing.Status.SOLD:  # sold out on the market: a new listing there
+                listing.price, listing.quantity, listing.status = price, item.quantity, Listing.Status.TO_PUBLISH
+                listing.market_listing_id, listing.sold_at, listing.listed_at = "", None, None
+                listing.pending_delete, listing.error_message = False, ""
+                listing.save()
+            elif listing.pending_delete:  # removed but still on the market: updated there instead
+                listing.price, listing.quantity, listing.status = price, item.quantity, Listing.Status.TO_PUBLISH
+                listing.pending_delete = False
+                listing.save()
+            elif listing.price != price:
+                listing.price = price
+                if listing.status == Listing.Status.PUBLISHED:
+                    listing.status = Listing.Status.TO_PUBLISH
+                listing.save(update_fields=["price", "status", "updated_at"])
         result.listed += 1
     return result
 
 
-def remove_listing(listing):
-    """Delete a listing locally and, if it was published, on CardTrader."""
+def remove_listing(listing, remote=True):
+    """Delete a listing locally and, if it is on its market, there too.
+
+    A CardTrader listing is deleted on CardTrader right away (remote=True, the user's token); any other one still on
+    its market (a market id, not sold) is only flagged pending_delete: the next sync deletes it there, then here.
+    """
     owner = listing.item.owner
-    if listing.ct_product_id and listing.status != Listing.Status.SOLD:
+    on_market = bool(listing.market_listing_id) and listing.status != Listing.Status.SOLD
+    if on_market and not (remote and listing.market == Market.CARDTRADER):
+        listing.pending_delete = True
+        listing.save(update_fields=["pending_delete", "updated_at"])
+        return
+    if on_market:
         with user_client(owner) as client:
             try:
                 client.delete_product(listing.ct_product_id)
@@ -649,6 +757,24 @@ def _decrements_stock(order):
     return order.state in (Order.State.PAID, Order.State.SENT, Order.State.ARRIVED, Order.State.DONE)
 
 
+def share_stock(item, exclude=None):
+    """Cap the item's listings on the other markets (all but listing exclude) to its remaining copies.
+
+    Shared stock: a capped listing that was published goes back to "to publish" (the next sync updates it on its
+    market); one left with no copies is removed (deleted on its market by the next sync when it is there).
+    """
+    for listing in item.listings.exclude(pk=getattr(exclude, "pk", None)):
+        if not listing.is_active or listing.quantity <= item.quantity:
+            continue
+        if item.quantity == 0:
+            remove_listing(listing, remote=False)
+            continue
+        listing.quantity = item.quantity
+        if listing.status == Listing.Status.PUBLISHED:
+            listing.status = Listing.Status.TO_PUBLISH
+        listing.save(update_fields=["quantity", "status", "updated_at"])
+
+
 def _apply_stock(order):
     for oi in order.items.select_related("listing__item"):
         listing = oi.listing
@@ -662,8 +788,46 @@ def _apply_stock(order):
             listing.sold_at = order.paid_at or timezone.now()
         listing.save(update_fields=["quantity", "status", "sold_at", "updated_at"])
         item.save(update_fields=["quantity", "updated_at"])
+        share_stock(item, exclude=listing)
     order.stock_applied = True
     order.save(update_fields=["stock_applied"])
+
+
+def save_order(owner, market, market_order_id, fields, lines):
+    """Create or update owner's order market_order_id on market, with its lines; removes the sold copies once.
+
+    fields: the Order fields to set; lines: dicts with market_item_id, market_listing_id, name, expansion, quantity,
+    price, condition, language, foil. A line is tied to the owner's listing with that market id on the market.
+    Returns (order, created).
+    """
+    order, created = Order.objects.update_or_create(
+        owner=owner, market=market, market_order_id=str(market_order_id), defaults=fields,
+    )
+    ids = [str(l.get("market_listing_id") or "") for l in lines]
+    listings = {
+        l.market_listing_id: l
+        for l in Listing.objects.owned_by(owner).filter(market=market, market_listing_id__in=[i for i in ids if i])
+    }
+    for position, line in enumerate(lines, start=1):
+        listing_id = str(line.get("market_listing_id") or "")
+        OrderItem.objects.update_or_create(
+            order=order,
+            market_item_id=str(line.get("market_item_id") or "") or f"line-{position}",
+            defaults={
+                "market_listing_id": listing_id,
+                "listing": listings.get(listing_id),
+                "name": (line.get("name") or "")[:200],
+                "expansion": (line.get("expansion") or "")[:200],
+                "quantity": line.get("quantity") or 1,
+                "price": line.get("price"),
+                "condition": (line.get("condition") or "")[:40],
+                "language": (line.get("language") or "")[:10],
+                "foil": bool(line.get("foil")),
+            },
+        )
+    if not order.stock_applied and _decrements_stock(order):
+        _apply_stock(order)
+    return order, created
 
 
 def upsert_order(data, owner):
@@ -672,64 +836,54 @@ def upsert_order(data, owner):
     method = data.get("order_shipping_method") or {}
     buyer = data.get("buyer") or {}
     total = data.get("seller_total") or {}
-    order, created = Order.objects.update_or_create(
-        ct_id=data["id"],
-        defaults={
-            "owner": owner,
-            "code": data.get("code") or "",
-            "state": data.get("state") or "",
-            "via_cardtrader_zero": bool(data.get("via_cardtrader_zero")),
-            "buyer_username": buyer.get("username") or "",
-            "buyer_email": buyer.get("email") or "",
-            "buyer_phone": buyer.get("phone") or "",
-            "ship_name": address.get("name") or "",
-            "ship_street": address.get("street") or "",
-            "ship_zip": address.get("zip") or "",
-            "ship_city": address.get("city") or "",
-            "ship_province": address.get("state_or_province") or "",
-            "ship_country": address.get("country") or "",
-            "ship_country_code": address.get("country_code") or "",
-            "ship_note": address.get("note") or "",
-            "shipping_method": method.get("name") or "",
-            "tracked": bool(method.get("tracked")),
-            "tracking_code": method.get("tracking_code") or "",
-            "max_shipping_days": method.get("max_estimate_shipping_days") or None,
-            "packing_number": data.get("packing_number"),
-            "size": data.get("size") or 0,
-            "total": money(total),
-            "currency": total.get("currency") or "",
-            "paid_at": _dt(data.get("paid_at")),
-            "sent_at": _dt(data.get("sent_at")),
-            "created_at": _dt((data.get("order_items") or [{}])[0].get("created_at")),
-            "raw": data,
-        },
-    )
-    listings = {
-        l.ct_product_id: l
-        for l in Listing.objects.owned_by(owner).filter(
-            ct_product_id__in=[i.get("product_id") for i in data.get("order_items") or []]
-        )
+    fee = money(data.get("seller_fee_amount"))
+    fields = {
+        "code": data.get("code") or "",
+        "state": data.get("state") or "",
+        "via_cardtrader_zero": bool(data.get("via_cardtrader_zero")),
+        "buyer_username": buyer.get("username") or "",
+        "buyer_email": buyer.get("email") or "",
+        "buyer_phone": buyer.get("phone") or "",
+        "ship_name": address.get("name") or "",
+        "ship_street": address.get("street") or "",
+        "ship_zip": address.get("zip") or "",
+        "ship_city": address.get("city") or "",
+        "ship_province": address.get("state_or_province") or "",
+        "ship_country": address.get("country") or "",
+        "ship_country_code": address.get("country_code") or "",
+        "ship_note": address.get("note") or "",
+        "shipping_method": method.get("name") or "",
+        "tracked": bool(method.get("tracked")),
+        "tracking_code": method.get("tracking_code") or "",
+        "max_shipping_days": method.get("max_estimate_shipping_days") or None,
+        "packing_number": data.get("packing_number"),
+        "size": data.get("size") or 0,
+        "items_total": money(data.get("seller_subtotal")),
+        "shipping_cost": money(method.get("seller_price")),
+        "market_fee": fee,
+        "total": money(total),
+        "net": None if fee is None or money(total) is None else money(total) - fee,
+        "currency": total.get("currency") or "",
+        "paid_at": _dt(data.get("paid_at")),
+        "sent_at": _dt(data.get("sent_at")),
+        "created_at": _dt((data.get("order_items") or [{}])[0].get("created_at")),
+        "raw": data,
     }
+    lines = []
     for raw in data.get("order_items") or []:
         props = raw.get("properties") or {}
-        OrderItem.objects.update_or_create(
-            order=order,
-            ct_id=raw["id"],
-            defaults={
-                "ct_product_id": raw.get("product_id"),
-                "listing": listings.get(raw.get("product_id")),
-                "name": raw.get("name") or "",
-                "expansion": raw.get("expansion") or "",
-                "quantity": raw.get("quantity") or 1,
-                "price": money(raw.get("seller_price")),
-                "condition": CONDITION_FROM_CT.get(props.get("condition"), props.get("condition") or ""),
-                "language": read_language(props),
-                "foil": read_foil(props),
-            },
-        )
-    if not order.stock_applied and _decrements_stock(order):
-        _apply_stock(order)
-    return order, created
+        lines.append({
+            "market_item_id": raw["id"],
+            "market_listing_id": raw.get("product_id") or "",
+            "name": raw.get("name"),
+            "expansion": raw.get("expansion"),
+            "quantity": raw.get("quantity"),
+            "price": money(raw.get("seller_price")),
+            "condition": CONDITION_FROM_CT.get(props.get("condition"), props.get("condition") or ""),
+            "language": read_language(props),
+            "foil": read_foil(props),
+        })
+    return save_order(owner, Market.CARDTRADER, data["id"], fields, lines)
 
 
 def import_orders(client, service):
@@ -744,39 +898,49 @@ def import_orders(client, service):
         updated += not was_created
     service.orders_synced_at = timezone.now()
     service.save(update_fields=["orders_synced_at"])
+    MarketConnection.objects.filter(user=owner, market=Market.CARDTRADER).update(
+        orders_synced_at=service.orders_synced_at)
     to_ship = Order.objects.owned_by(owner).filter(state=Order.State.PAID).count()
     _log(f"{CARDTRADER}: {created} new orders, {updated} updated, {to_ship} to ship", owner=owner)
     return created, updated
 
 
-def _diff_listings(service, products):
-    """Open/refresh conflicts between service's user's listings and their CardTrader products."""
-    remote = {p["id"]: p for p in products}
+def diff_listings(user, market, remote, service=None):
+    """Open/refresh conflicts between user's published listings on market and remote: {market listing id (str):
+    (price or None, quantity or None)}, the listings on the market. Returns the number of open conflicts."""
+    label = Market(market).label
     seen = set()
-    listings = Listing.objects.owned_by(service.user).filter(
-        status=Listing.Status.PUBLISHED, ct_product_id__isnull=False
-    ).select_related("item__card")
+    listings = Listing.objects.owned_by(user).filter(
+        market=market, status=Listing.Status.PUBLISHED, pending_delete=False,
+    ).exclude(market_listing_id="").select_related("item__card")
     for listing in listings:
-        product = remote.get(listing.ct_product_id)
+        product = remote.get(listing.market_listing_id)
         diffs = []
         if product is None:
-            diffs.append(("status", "Published", "Not on CardTrader", None))
+            diffs.append(("status", "Published", f"Not on {label}", None))
         else:
-            remote_price = money(product.get("price_cents"))
+            remote_price, remote_qty = product
             if remote_price is not None and remote_price != listing.price:
                 diffs.append(("price", f"€{listing.price}", f"€{remote_price}", remote_price))
-            remote_qty = product.get("quantity")
             if remote_qty is not None and remote_qty != listing.quantity:
                 diffs.append(("quantity", f"{listing.quantity} for sale", f"{remote_qty} for sale", Decimal(remote_qty)))
         for field_name, local, remote_value, amount in diffs:
             conflict, _ = SyncConflict.objects.update_or_create(
-                service=service, item=listing.item, field=field_name, resolution=SyncConflict.Resolution.OPEN,
-                defaults={"local_value": local, "remote_value": remote_value, "remote_amount": amount},
+                market=market, item=listing.item, field=field_name, resolution=SyncConflict.Resolution.OPEN,
+                defaults={"local_value": local, "remote_value": remote_value, "remote_amount": amount,
+                          "service": service},
             )
             seen.add(conflict.pk)
-    stale = SyncConflict.objects.filter(service=service, resolution=SyncConflict.Resolution.OPEN).exclude(pk__in=seen)
+    stale = (SyncConflict.objects.owned_by(user).filter(market=market, resolution=SyncConflict.Resolution.OPEN)
+             .exclude(pk__in=seen))
     stale.delete()
     return len(seen)
+
+
+def _diff_listings(service, products):
+    """Open/refresh conflicts between service's user's CardTrader listings and their CardTrader products."""
+    remote = {str(p["id"]): (money(p.get("price_cents")), p.get("quantity")) for p in products}
+    return diff_listings(service.user, Market.CARDTRADER, remote, service=service)
 
 
 def sync_all(user):
@@ -788,9 +952,11 @@ def sync_all(user):
             conflicts = _diff_listings(service, client.my_products() or [])
     except CardTraderError as exc:
         _log(f"{CARDTRADER}: sync failed ({exc})", SyncLog.Level.ERROR, owner=user)
+        mark_failed(user, Market.CARDTRADER, exc)
         raise
     service.last_sync = timezone.now()
     service.save(update_fields=["last_sync"])
+    mark_synced(user, Market.CARDTRADER, when=service.last_sync)
     if conflicts:
         _log(f"{CARDTRADER}: {conflicts} listings differ from Ledger", SyncLog.Level.WARNING, owner=user)
     else:
@@ -800,7 +966,7 @@ def sync_all(user):
 
 def resolve_conflict(conflict, keep):
     """keep is 'ledger' or 'remote'."""
-    listing = getattr(conflict.item, "listing", None)
+    listing = conflict.listing
     with transaction.atomic():
         if listing is not None:
             if keep == SyncConflict.Resolution.REMOTE:
@@ -809,28 +975,33 @@ def resolve_conflict(conflict, keep):
                 elif conflict.field == "quantity" and conflict.remote_amount is not None:
                     listing.quantity = int(conflict.remote_amount)
                 elif conflict.field == "status":
-                    # Gone from CardTrader: treat as no longer listed.
-                    listing.ct_product_id = None
+                    # Gone from the market: treat as no longer listed.
+                    listing.market_listing_id = ""
                     listing.status = Listing.Status.SOLD
                     listing.sold_at = listing.sold_at or timezone.now()
                 listing.save()
             else:
                 # Ledger wins: push local values again on next publish.
                 if conflict.field == "status":
-                    listing.ct_product_id = None  # recreate the product
+                    listing.market_listing_id = ""  # recreate the product
                 listing.status = Listing.Status.TO_PUBLISH
                 listing.save()
         conflict.resolution = keep
         conflict.save(update_fields=["resolution"])
         _log(
-            f"{conflict.service.name}: conflict on {conflict.item.card.name} resolved "
+            f"{conflict.get_market_display()}: conflict on {conflict.item.card.name} resolved "
             f"({conflict.get_resolution_display().lower()})",
             owner=conflict.item.owner,
         )
 
 
+NOT_CARDTRADER = "Only CardTrader orders are shipped from here: mark the others as shipped with the CardLedger extension."
+
+
 def ship_order(order, tracking_code=""):
     """Set the tracking code (if any) and mark the order as shipped on CardTrader."""
+    if order.market != Market.CARDTRADER:
+        raise CardTraderError(NOT_CARDTRADER)
     tracking_code = tracking_code.strip()
     if (order.via_cardtrader_zero or order.tracked) and not (tracking_code or order.tracking_code):
         kind = "CardTrader Zero orders" if order.via_cardtrader_zero else "Tracked shipments"
@@ -852,6 +1023,8 @@ def ship_order(order, tracking_code=""):
 
 
 def save_tracking_code(order, tracking_code):
+    if order.market != Market.CARDTRADER:
+        raise CardTraderError(NOT_CARDTRADER)
     with user_client(order.owner) as client:
         client.set_tracking_code(order.ct_id, tracking_code.strip())
     order.tracking_code = tracking_code.strip()

@@ -197,7 +197,7 @@ class PublishGameTest(LedgerTestCase):
                                                  "pokemon_reverse": True}
         self.ct.orders = [order]
         services.import_orders(self.ct.client(), services.get_cardtrader(self.user))
-        line = OrderItem.objects.get(ct_id=90010)
+        line = OrderItem.objects.get(market_item_id=90010)
         self.assertEqual(line.language, "IT")
         self.assertIs(line.foil, True)
         self.assertEqual(line.listing, self.listing)

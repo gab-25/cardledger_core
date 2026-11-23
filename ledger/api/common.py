@@ -39,6 +39,8 @@ def _form_field(field):
     kwargs = {"required": field.required}
     if isinstance(field, forms.BooleanField):
         return serializers.BooleanField(required=False)
+    if isinstance(field, forms.MultipleChoiceField):
+        return serializers.MultipleChoiceField(choices=list(field.choices), **kwargs)
     if isinstance(field, forms.ChoiceField):
         return serializers.ChoiceField(choices=[c for c in field.choices if c[0] != ""], **kwargs)
     if isinstance(field, forms.DecimalField):  # before IntegerField, its parent

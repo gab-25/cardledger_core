@@ -185,6 +185,7 @@ SPECTACULAR_SETTINGS = {
     'COMPONENT_SPLIT_REQUEST': True,
     'ENUM_NAME_OVERRIDES': {
         'ConditionEnum': 'ledger.models.Condition',
+        'MarketEnum': 'ledger.models.Market',
         'LanguageEnum': 'ledger.models.Language',
         'ScanSessionStatusEnum': 'ledger.models.ScanSession.Status',
     },

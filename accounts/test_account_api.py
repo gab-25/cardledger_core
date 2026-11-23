@@ -151,7 +151,7 @@ class MeTest(TestCase):
         self.assertEqual(self.me()["prices_updated_at"][:19], when.isoformat()[:19])
 
     def market(self):
-        return self.me()["markets"][0]
+        return next(m for m in self.me()["markets"] if m["code"] == "ct")
 
     def test_market_status(self):
         self.assertEqual(self.market()["status"], "off")

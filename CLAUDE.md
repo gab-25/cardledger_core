@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 CardLedger server: a Django 6 + Django REST Framework app (Python 3.14, managed with `uv`) that holds a trading card
-collection (Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages CardTrader sales. It exposes
+collection (Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages sales on Cardmarket and CardTrader (synced by a browser extension). It exposes
 only a JSON API under `/api/`; the interface is a
 separate React SPA ([cardledger_ui](https://github.com/gab-25/cardledger_ui)), included as the git submodule `ui/`
 (pinned to a release tag; the Dockerfile builds it in a Node stage), whose built `index.html` Django serves for every
@@ -81,13 +81,42 @@ There is no linter or formatter configured. Settings come only from the environm
   names per game from the blueprint's `editable_properties` (Magic's payload is unchanged); a non-Magic listing
   CardTrader can't describe fails instead of being published. The catalog and
   collection JSON keep the old field names (`ct_id`, `category_id`), now holding Cardmarket ids.
+- **Markets and the browser extension**: `Market` ("cm" Cardmarket, "ct" CardTrader). Both are synced by the
+  Chrome extension (separate repo cardledger_extension) from the user's browser, only when the user presses Sync;
+  the server never calls a market for it. The old CardTrader endpoints (`listings/publish/`, `sync/run/`,
+  `orders/import/`, `orders/<pk>/ship/`, single listing DELETE) still call CardTrader with the user's token, for
+  CardTrader rows only. `Listing` is one per (item, market) (`item.listings`, `item.listing_for(market)`,
+  `active_listings()`; there is no `item.listing`): `market_listing_id` (CardTrader product id / Cardmarket article
+  id; `Listing.ct_product_id` is a property over it), status to_publish|published|paused|error|sold, `error_message`,
+  `listed_at`, and `pending_delete` (removed by the user while on its market: hidden everywhere, deleted there by the
+  next sync, then here; re-listing reuses the row). `Order` has `market` + `market_order_id` (unique per owner and
+  market; `Order.ct_id` is a property), `buyer_name`, `items_total`, `shipping_cost`, `market_fee`, `net`;
+  `OrderItem` has `market_item_id`/`market_listing_id`. `services.save_order` upserts any market's order and removes
+  the sold copies once (`stock_applied`); **shared stock** (`services.share_stock`): the item's listings on the other
+  markets are capped to its remaining copies, a published one goes back to to_publish, one left with no copies is
+  removed (pending_delete). `SyncConflict.market` (`service` is CardTrader's SyncService or null);
+  `services.diff_listings(user, market, remote)` serves both markets. `MarketConnection(user, market)`: handle,
+  status off|never|ok|error, last_sync, last_error, orders_synced_at (`services.connection`/`mark_synced`/
+  `mark_failed`); `services.market_states(user)` is `me`'s and the extension's `markets` (CardTrader keeps its old
+  token + log rule, Cardmarket is its connection: off until pairing). Data migrations 0036-0038 turned the existing
+  rows into market "ct" (`test_markets_migration.py`).
+  Extension (`ledger/extension.py`, views `ledger/api/extension.py`, `/api/extension/`): pairing (`pair/` with the
+  session → a 10-minute `ABCD-1234` code; `claim/` without session, rate-limited per IP in the cache → the raw token,
+  shown once; `ExtensionToken` keeps only its sha256; `tokens/` list and revoke). The other endpoints accept only
+  `Authorization: Token <token>` (`ExtensionTokenAuthentication`, used nowhere else): `status/`, `cardtrader-token/`,
+  `plan/?market=` (`action_of`: create/update for to_publish|error, delete for paused or pending_delete rows on the
+  market), `report/` (`apply_report`, idempotent per `ExtensionRun.run_id`: results, orders, stock reconciliation
+  with `unmatched` rows, connection, SyncLog), `shipped/`. `me` adds `extension: {paired, last_seen_at}`.
 - **Dealer data**: `CollectionItem.cost` (purchase price per copy) and `location` (storage, e.g. "A3·12"), in the
   item API, the CSV columns and the order packing list (`orders/<pk>/` items carry `location`, sorted by it).
-  `GET /api/collection/` rows add `trend` (= `price`), `cost`, `location`, `listing_price`, `added_at`; `?view=`
-  (`_views()` in `ledger/api/collection.py`: `below_trend`, `not_listed`, `stale`, `bulk`; a sold listing counts as
-  none) with `views` counts that honour the other filters. `POST /api/collection/bulk/` acts on the user's items of
-  the game (`set_location`, `delete`, `list`/`reprice` through `services.list_at_trend`, priced by
-  `price_over_trend`). `GET /api/overview/` (`ledger/api/overview.py`) is the dashboard: revenue and profit from the
+  `GET /api/collection/` rows add `trend` (= `price`), `cost`, `location`, `listing_price` (lowest active price, any market),
+  `listings` (`[{market, status, price}]`), `added_at`; `?view=` (`_views()` in `ledger/api/collection.py`:
+  `below_trend`, `not_listed`, `stale`, `bulk`; Exists over the active listings of any market, a sold or removed
+  listing counts as none) with `views` counts that honour the other filters. `POST /api/collection/bulk/` acts on the user's items of
+  the game (`set_location`, `delete`, `list`/`reprice` through `services.list_at_trend` on `markets`, default `["ct"]`,
+  priced by `price_over_trend`). `GET /api/listings/` has `?market=`, rows per (item, market) and `by_market` stats;
+  `listings/<item>/` reads all of an item's listings and PUTs/DELETEs one by `market` (default ct);
+  `POST /api/listings/bulk/` pauses/resumes/deletes the listings of item ids (optionally of one market). `GET /api/overview/` (`ledger/api/overview.py`) is the dashboard: revenue and profit from the
   global orders, stock value per game, the game's price movers. The user's `accounts.SellerSettings` (created on
   demand, `seller_settings_of`) feed it: `price_rounding` ("" = 0.05, else 0.05/0.10/0.50/1.00) is the bulk price
   step, `hold_below_cost` skips items whose new price would be under their cost, `default_condition` is the add
@@ -102,9 +131,10 @@ There is no linter or formatter configured. Settings come only from the environm
   password changed/reset, CardTrader token saved/removed; IP is `REMOTE_ADDR`) behind `GET /api/account/activity/`;
   `BusinessDetails` (`business_of`; shop name and VAT stay on `Profile`) with the logo in the default storage
   (`MEDIA_ROOT`, env `DJANGO_MEDIA_ROOT`, served by `config.views.media` under `/media/`; a compose volume).
-  `me` adds `counts.copies`/`live_listings` (per `?game`), `markets` (CardTrader: off without a token, never before
-  any sync, error when the user's latest `CardTrader:` log entry has `SyncLog.Level.ERROR`, written when a sync or
-  publish raises, else ok) and `prices_updated_at`. Price guide expressions for items (`trend_price`,
+  `me` adds `counts.copies`/`live_listings` (per `?game`), `markets` (Cardmarket and CardTrader with `handle`, see
+  Markets; CardTrader: off without a token, never before any sync, error when the user's latest `CardTrader:` log
+  entry has `SyncLog.Level.ERROR`, written when a sync or publish raises, else ok), `extension` and
+  `prices_updated_at`. Price guide expressions for items (`trend_price`,
   `item_guide_price`, foil-aware) live in `ledger/cardmarket.py`.
 - **Scan pipeline**: photo → `ledger/openrouter.py` (vision model reads the card) → `ledger/recognition.py` (matches
   it to a `Blueprint` of the local catalog) → `ledger/scan.py` (draft lines of a `ScanSession`, saved into the

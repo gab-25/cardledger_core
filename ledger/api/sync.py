@@ -27,7 +27,7 @@ def sync(request):
     )
     conflicts = (
         SyncConflict.objects.owned_by(user).filter(resolution=SyncConflict.Resolution.OPEN)
-        .select_related("item__card", "service")
+        .select_related("item__card")
     )
     return Response({
         "pending_changes": Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH).count(),
@@ -42,7 +42,8 @@ def sync(request):
         "conflicts": [
             {
                 "id": c.pk, "name": c.item.card.name, "set_code": c.item.card.set_code,
-                "condition": c.item.condition, "language": c.item.language, "service": c.service.name,
+                "condition": c.item.condition, "language": c.item.language, "service": c.get_market_display(),
+                "market": c.market,
                 "local_value": c.local_value, "remote_value": c.remote_value,
             }
             for c in conflicts

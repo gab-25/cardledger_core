@@ -23,7 +23,8 @@ from ledger import services as ledger_services
 from ledger.api.common import (GAME, doc, form_body, form_errors, form_fields, game_param, messages_response,
                                msg)
 from ledger.cardtrader import CardTraderError
-from ledger.models import CardmarketPrice, CollectionItem, Listing, Order, SyncLog, SyncService
+from ledger.extension import extension_state
+from ledger.models import CardmarketPrice, CollectionItem, Listing, Order
 
 from .forms import (BusinessForm, BusinessProfileForm, CardTraderTokenForm, LoginForm, LogoForm, ProfileForm,
                     SellerSettingsForm)
@@ -48,37 +49,17 @@ def _user(user):
     }
 
 
-def _cardtrader_status(user):
-    """CardTrader as one of me's markets.
-
-    status: off without a token; never with a token but no sync or publish yet (SyncService.last_sync empty); error
-    when the user's latest CardTrader log entry is an error (a sync or publish that failed, SyncLog.Level.ERROR);
-    ok otherwise.
-    """
-    service = SyncService.objects.filter(user=user, name=ledger_services.CARDTRADER).first()
-    connected = bool(service and service.api_token)
-    last_sync = service.last_sync if service else None
-    if not connected:
-        state = "off"
-    elif last_sync is None:
-        state = "never"
-    else:
-        latest = (SyncLog.objects.filter(owner=user, message__startswith=f"{ledger_services.CARDTRADER}:")
-                  .values_list("level", flat=True).first())
-        state = "error" if latest == SyncLog.Level.ERROR else "ok"
-    return {"code": "ct", "name": ledger_services.CARDTRADER, "connected": connected, "status": state,
-            "last_sync": last_sync}
-
-
 @doc(TAGS, "The logged-in user, the sidebar counters (?game limits pending_changes, copies and live_listings to a "
-           "game), the marketplaces' state and the date of the latest Cardmarket price guide. A market's status: off "
-           "(no token), never (never synced), error (its latest log entry is a failed sync or publish), ok",
+           "game), the marketplaces' state (Cardmarket and CardTrader, with the seller handle), whether the browser "
+           "extension is paired (and when it was last seen) and the date of the latest Cardmarket price guide. "
+           "CardTrader's status: off (no token), never (never synced), error (its latest log entry is a failed sync "
+           "or publish), ok; Cardmarket's: off until the extension is paired, then its connection's status",
      parameters=[GAME])
 @api_view(["GET"])
 def me(request):
     user = request.user
     pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
-    live = Listing.objects.owned_by(user).filter(status=Listing.Status.PUBLISHED)
+    live = Listing.objects.owned_by(user).filter(status=Listing.Status.PUBLISHED, pending_delete=False)
     items = CollectionItem.objects.owned_by(user)
     if request.query_params.get("game", "").strip():
         game = game_param(request.query_params)
@@ -93,7 +74,8 @@ def me(request):
             "copies": items.aggregate(n=Sum("quantity"))["n"] or 0,
             "live_listings": live.count(),
         },
-        "markets": [_cardtrader_status(user)],
+        "markets": ledger_services.market_states(user),
+        "extension": extension_state(user),
         "prices_updated_at": CardmarketPrice.objects.aggregate(d=Max("prices_date"))["d"],
     })
 

@@ -11,6 +11,7 @@ from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
 from .models import (
+    ExtensionToken,
     Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, SyncConflict, SyncLog, SyncService,
 )
 from .tests import LedgerTestCase, game
@@ -98,7 +99,7 @@ class OwnedByTest(TestCase):
         item = CollectionItem.objects.create(card=card, owner=user)
         listing = Listing.objects.create(item=item, price=Decimal("1.00"))
         order = Order.objects.create(ct_id=n, code=f"c{n}", owner=user)
-        order_item = OrderItem.objects.create(order=order, ct_id=n, name="x")
+        order_item = OrderItem.objects.create(order=order, market_item_id=n, name="x")
         session = ScanSession.objects.create(owner=user, game=game())
         line = ScanLine.objects.create(session=session, condition="NM")
         service = SyncService.objects.create(name="CardTrader", user=user)
@@ -127,7 +128,7 @@ class OwnerIsolationSweepTest(LedgerTestCase):
     TARGETS = {
         "api_item": lambda t: t.item.pk, "api_listing": lambda t: t.listing.item_id,
         "api_order": lambda t: t.order.pk, "api_order_ship": lambda t: t.order.pk,
-        "api_resolve": lambda t: t.conflict.pk,
+        "api_resolve": lambda t: t.conflict.pk, "api_extension_token": lambda t: t.ext_token.pk,
         "scan_api_session": lambda t: t.session.uuid, "scan_api_captures": lambda t: t.session.uuid,
         "scan_api_search": lambda t: t.session.uuid, "scan_api_manual": lambda t: t.session.uuid,
         "scan_api_review": lambda t: t.session.uuid,
@@ -144,6 +145,7 @@ class OwnerIsolationSweepTest(LedgerTestCase):
         self.conflict = SyncConflict.objects.owned_by(self.user).first()
         self.session = ScanSession.objects.create(owner=self.user, game=game())
         self.line = ScanLine.objects.create(session=self.session, condition="NM", frame=b"jpeg")
+        self.ext_token = ExtensionToken.objects.create(user=self.user, key="0" * 64, name="Chrome")
         self.client.force_login(self.other)
 
     def test_every_object_url_is_covered(self):

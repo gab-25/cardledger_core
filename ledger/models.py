@@ -55,6 +55,14 @@ class Language(models.TextChoices):
 MAGIC = "mtg"
 
 
+class Market(models.TextChoices):
+    """A marketplace CardLedger sells on; both are synced by the browser extension (CardTrader also by the server's
+    legacy publish/import endpoints)."""
+
+    CARDMARKET = "cm", "Cardmarket"
+    CARDTRADER = "ct", "CardTrader"
+
+
 class Game(models.Model):
     """A trading card game of the catalog (Magic, Pokémon, ...): its Cardmarket and CardTrader ids."""
 
@@ -159,39 +167,76 @@ class CollectionItem(models.Model):
     def __str__(self):
         return f"{self.quantity}× {self.card} {self.condition} {self.language}"
 
+    def listing_for(self, market=Market.CARDTRADER):
+        """The item's listing on market (any status), or None; uses prefetched listings when there are."""
+        return next((l for l in self.listings.all() if l.market == market), None)
+
+    def active_listings(self):
+        """The item's listings that are not sold nor removed (any market)."""
+        return [l for l in self.listings.all() if l.is_active]
+
     @property
     def status(self):
-        listing = getattr(self, "listing", None)
-        if listing is None or listing.status == Listing.Status.SOLD:
+        """In collection without an active listing; sync pending when one waits to be pushed; else for sale."""
+        active = self.active_listings()
+        if not active:
             return self.Status.COLLECTION
-        if listing.status == Listing.Status.TO_PUBLISH:
+        if any(l.status == Listing.Status.TO_PUBLISH for l in active):
             return self.Status.PENDING
         return self.Status.FOR_SALE
 
 
 class Listing(models.Model):
-    """A sale listing on CardTrader for a collection item."""
+    """A sale listing of a collection item on one market (one per item and market)."""
 
     class Status(models.TextChoices):
         PUBLISHED = "published", "Published"
         TO_PUBLISH = "to_publish", "To publish"
+        PAUSED = "paused", "Paused"  # kept locally, taken off the market (the next sync deletes it there)
+        ERROR = "error", "Error"  # the last push failed (error_message); retried by the next sync
         SOLD = "sold", "Sold"
 
-    item = models.OneToOneField(CollectionItem, on_delete=models.CASCADE, related_name="listing")
+    item = models.ForeignKey(CollectionItem, on_delete=models.CASCADE, related_name="listings")
+    market = models.CharField(max_length=2, choices=Market.choices, default=Market.CARDTRADER)
+    market_listing_id = models.CharField(
+        max_length=64, blank=True, db_index=True,
+        help_text="The listing's id on the market (CardTrader product id, Cardmarket article id); blank until pushed",
+    )
     quantity = models.PositiveIntegerField(default=1)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.TO_PUBLISH)
-    ct_product_id = models.PositiveBigIntegerField("CardTrader product", null=True, blank=True, unique=True)
+    error_message = models.CharField(max_length=300, blank=True)
+    listed_at = models.DateTimeField(null=True, blank=True, help_text="When it was first published")
+    pending_delete = models.BooleanField(
+        default=False, help_text="Removed by the user while on the market: the next sync deletes it there, then here",
+    )
     sold_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = owned_manager("item__owner")
 
     class Meta:
-        ordering = ["item__card__name"]
+        ordering = ["item__card__name", "market"]
+        constraints = [models.UniqueConstraint(fields=["item", "market"], name="unique_listing_item_market")]
 
     def __str__(self):
-        return f"{self.item.card} @ {self.price}"
+        return f"{self.item.card} @ {self.price} ({self.market})"
+
+    @property
+    def is_active(self):
+        """Not sold and not removed by the user (a removed one waits only to be deleted on the market)."""
+        return self.status != self.Status.SOLD and not self.pending_delete
+
+    @property
+    def ct_product_id(self):
+        """The CardTrader product id of a CardTrader listing (an int), None when not pushed or another market."""
+        if self.market != Market.CARDTRADER or not self.market_listing_id.isdigit():
+            return None
+        return int(self.market_listing_id)
+
+    @ct_product_id.setter
+    def ct_product_id(self, value):
+        self.market_listing_id = "" if value is None else str(value)
 
 
 class SyncService(models.Model):
@@ -216,13 +261,52 @@ class SyncService(models.Model):
         return self.name
 
 
+class MarketConnection(models.Model):
+    """A user's state on one market: whether it is connected, their seller name there and the last sync.
+
+    status: off (disconnected), never (connected, never synced), ok, error (the last sync or publish failed,
+    last_error). CardTrader's row follows the saved token (services.set_api_token / remove_api_token).
+    """
+
+    class Status(models.TextChoices):
+        OK = "ok", "OK"
+        ERROR = "error", "Error"
+        NEVER = "never", "Never synced"
+        OFF = "off", "Off"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="market_connections")
+    market = models.CharField(max_length=2, choices=Market.choices)
+    handle = models.CharField(max_length=120, blank=True, help_text="The seller name on the market")
+    status = models.CharField(max_length=5, choices=Status.choices, default=Status.NEVER)
+    last_sync = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=300, blank=True)
+    orders_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["market"]
+        constraints = [models.UniqueConstraint(fields=["user", "market"], name="unique_market_connection")]
+
+    def __str__(self):
+        return f"{self.user} on {self.get_market_display()}: {self.status}"
+
+    @property
+    def connected(self):
+        return self.status != self.Status.OFF
+
+
 class SyncConflict(models.Model):
     class Resolution(models.TextChoices):
         OPEN = "open", "Open"
         LEDGER = "ledger", "Kept Ledger"
         REMOTE = "remote", "Kept remote"
 
-    service = models.ForeignKey(SyncService, on_delete=models.CASCADE, related_name="conflicts")
+    service = models.ForeignKey(  # CardTrader's SyncService; None for the other markets' conflicts
+        SyncService, on_delete=models.CASCADE, null=True, blank=True, related_name="conflicts",
+    )
+    market = models.CharField(max_length=2, choices=Market.choices, default=Market.CARDTRADER)
     item = models.ForeignKey(CollectionItem, on_delete=models.CASCADE, related_name="conflicts")
     field = models.CharField(max_length=40, blank=True, help_text="Listing field that differs, e.g. 'price'")
     local_value = models.CharField(max_length=120)
@@ -241,6 +325,11 @@ class SyncConflict(models.Model):
 
     def __str__(self):
         return f"{self.item.card}: {self.local_value} ≠ {self.remote_value}"
+
+    @property
+    def listing(self):
+        """The listing of the conflict's item on its market, or None."""
+        return self.item.listing_for(self.market)
 
 
 class SyncLog(models.Model):
@@ -266,7 +355,7 @@ class SyncLog(models.Model):
 
 
 class Order(models.Model):
-    """A CardTrader sale order (you are the seller)."""
+    """A sale order on a market (you are the seller)."""
 
     class State(models.TextChoices):
         HUB_PENDING = "hub_pending", "CT Zero pending"
@@ -280,11 +369,13 @@ class Order(models.Model):
         CLOSED = "closed", "Merged (CT Zero)"
 
     owner = _owner("orders")
-    ct_id = models.PositiveBigIntegerField(unique=True)
+    market = models.CharField(max_length=2, choices=Market.choices, default=Market.CARDTRADER)
+    market_order_id = models.CharField(max_length=64, help_text="The order's id on the market")
     code = models.CharField(max_length=40)
     state = models.CharField(max_length=24, default=State.PAID)
     via_cardtrader_zero = models.BooleanField(default=False)
     buyer_username = models.CharField(max_length=120, blank=True)
+    buyer_name = models.CharField(max_length=200, blank=True)
     buyer_email = models.CharField(max_length=200, blank=True)
     buyer_phone = models.CharField(max_length=40, blank=True)
     ship_name = models.CharField(max_length=200, blank=True)
@@ -301,7 +392,11 @@ class Order(models.Model):
     max_shipping_days = models.PositiveIntegerField(null=True, blank=True)
     packing_number = models.PositiveIntegerField(null=True, blank=True)
     size = models.PositiveIntegerField(default=0)
+    items_total = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    shipping_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    market_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    net = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, help_text="total - market_fee")
     currency = models.CharField(max_length=3, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
@@ -315,10 +410,23 @@ class Order(models.Model):
     objects = owned_manager("owner")
 
     class Meta:
-        ordering = ["-paid_at", "-ct_id"]
+        ordering = ["-paid_at", "-id"]
+        constraints = [models.UniqueConstraint(fields=["owner", "market", "market_order_id"],
+                                               name="unique_order_market_id")]
 
     def __str__(self):
         return f"#{self.code}"
+
+    @property
+    def ct_id(self):
+        """CardTrader's id of a CardTrader order (an int), None otherwise."""
+        if self.market != Market.CARDTRADER or not self.market_order_id.isdigit():
+            return None
+        return int(self.market_order_id)
+
+    @ct_id.setter
+    def ct_id(self, value):
+        self.market_order_id = str(value)
 
     @property
     def state_label(self):
@@ -339,8 +447,8 @@ class Order(models.Model):
 
 class OrderItem(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="items")
-    ct_id = models.PositiveBigIntegerField()
-    ct_product_id = models.PositiveBigIntegerField(null=True, blank=True)
+    market_item_id = models.CharField(max_length=64, blank=True, help_text="The order line's id on the market")
+    market_listing_id = models.CharField(max_length=64, blank=True, help_text="The listing it sold, on the market")
     listing = models.ForeignKey(Listing, null=True, blank=True, on_delete=models.SET_NULL, related_name="order_items")
     name = models.CharField(max_length=200)
     expansion = models.CharField(max_length=200, blank=True)
@@ -354,7 +462,8 @@ class OrderItem(models.Model):
 
     class Meta:
         ordering = ["name"]
-        constraints = [models.UniqueConstraint(fields=["order", "ct_id"], name="unique_order_item")]
+        constraints = [models.UniqueConstraint(fields=["order", "market_item_id"], condition=~Q(market_item_id=""),
+                                               name="unique_order_item_market_id")]
 
     def __str__(self):
         return f"{self.quantity}× {self.name}"
@@ -532,3 +641,57 @@ class MissingCardReport(models.Model):
 
     def __str__(self):
         return f"{self.game}: {self.q}"
+
+
+class ExtensionToken(models.Model):
+    """A browser extension paired with a user's account: only the sha256 of its key is stored."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="extension_tokens")
+    key = models.CharField(max_length=64, unique=True, help_text="sha256 hex of the token")
+    name = models.CharField(max_length=100, blank=True, help_text='The browser it was paired from, e.g. "Chrome"')
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked = models.BooleanField(default=False)
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.name or 'Extension'} of {self.user}"
+
+
+class ExtensionPairing(models.Model):
+    """A one-time pairing code shown on the Account page, claimed by the extension within its expiry."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="extension_pairings")
+    code = models.CharField(max_length=9, unique=True, help_text='e.g. "ABCD-1234"')
+    expires_at = models.DateTimeField()
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.code
+
+
+class ExtensionRun(models.Model):
+    """One sync run reported by the extension (POST /api/extension/report/), kept so a retried report is applied once."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="extension_runs")
+    run_id = models.UUIDField()
+    market = models.CharField(max_length=2, choices=Market.choices)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error = models.CharField(max_length=300, blank=True)
+    response = models.JSONField(default=dict, blank=True, help_text="The answer given, repeated on a retry")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [models.UniqueConstraint(fields=["user", "run_id"], name="unique_extension_run")]
+
+    def __str__(self):
+        return f"{self.market} run {self.run_id}"

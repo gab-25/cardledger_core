@@ -7,7 +7,7 @@ from django.db.models.functions import Now
 from accounts.models import seller_settings_of
 
 from . import catalog
-from .models import Blueprint, Card, CollectionItem, Condition, Language, Listing
+from .models import Blueprint, Card, CollectionItem, Condition, Language, Listing, Market
 
 
 def get_or_create_card(game, name, set_code, collector_number="", **defaults):
@@ -127,6 +127,8 @@ class BulkForm(forms.Form):
     location = forms.CharField(max_length=40, required=False)
     pct = forms.DecimalField(max_digits=6, decimal_places=2, min_value=Decimal("-99"), max_value=Decimal("1000"),
                              required=False, help_text="list/reprice: percent over the trend (default 0)")
+    markets = forms.MultipleChoiceField(choices=Market.choices, required=False,
+                                        help_text='list/reprice: the markets to act on (default ["ct"])')
 
 
 class CsvImportForm(forms.Form):

@@ -74,7 +74,7 @@ class CatalogExtrasTest(LedgerTestCase):
         def sold(ct_id, days_ago, qty, state="paid", owner=None):
             order = Order.objects.create(owner=owner or self.other, ct_id=ct_id, code=f"o{ct_id}", state=state,
                                          paid_at=timezone.now() - timedelta(days=days_ago))
-            OrderItem.objects.create(order=order, ct_id=ct_id, listing=listing, name="Ugin", quantity=qty)
+            OrderItem.objects.create(order=order, market_item_id=ct_id, listing=listing, name="Ugin", quantity=qty)
 
         sold(1, 2, 2)
         sold(2, 10, 1)

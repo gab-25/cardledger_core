@@ -11,6 +11,8 @@ _ITEM_BADGES = {
 _LISTING_BADGES = {
     Listing.Status.PUBLISHED: "live",
     Listing.Status.TO_PUBLISH: "pending",
+    Listing.Status.PAUSED: "neutral",
+    Listing.Status.ERROR: "danger",
     Listing.Status.SOLD: "neutral",
 }
 

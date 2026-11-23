@@ -302,7 +302,7 @@ def load_demo(owner):
     ]
     for ct_id, code, state, ct0, buyer, addr, method, tracked, packing, lines in orders:
         name, street, zip_code, city, prov, country, cc = addr or ("", "", "", "", "", "", "")
-        order, _ = Order.objects.update_or_create(ct_id=ct_id, defaults={
+        order, _ = Order.objects.update_or_create(market_order_id=str(ct_id), defaults={
             "owner": owner,
             "code": code, "state": state, "via_cardtrader_zero": ct0, "buyer_username": buyer,
             "ship_name": name, "ship_street": street, "ship_zip": zip_code, "ship_city": city,
@@ -316,7 +316,7 @@ def load_demo(owner):
             "stock_applied": True,
         })
         for i, (card_name, expansion, qty, price, cond) in enumerate(lines, start=1):
-            OrderItem.objects.update_or_create(order=order, ct_id=ct_id * 10 + i, defaults={
+            OrderItem.objects.update_or_create(order=order, market_item_id=ct_id * 10 + i, defaults={
                 "name": card_name, "expansion": expansion, "quantity": qty,
                 "price": Decimal(price), "condition": cond, "language": "EN",
             })
@@ -886,12 +886,14 @@ class SaleApiTest(LedgerTestCase):
 
     def test_listings_stats_and_filter(self):
         data = self.client.get(reverse("ledger:api_listings")).json()
-        self.assertEqual(set(data["stats"]), {"active", "value", "sold_month", "to_publish"})
+        self.assertEqual(set(data["stats"]), {"active", "value", "sold_month", "to_publish", "paused", "error"})
+        self.assertEqual(set(data["by_market"]), {"cm", "ct"})
+        self.assertEqual(data["by_market"]["ct"], data["stats"])  # only CardTrader listings in the demo
         self.assertEqual(data["stats"]["to_publish"], 3)
         self.assertEqual(data["status"], "")
         row = next(r for r in data["results"] if r["name"] == "Counterspell")
-        self.assertEqual(set(row), {"item_id", "name", "set_code", "condition", "language", "foil", "quantity",
-                                    "price", "badge"})
+        self.assertEqual(set(row), {"id", "item_id", "name", "set_code", "condition", "language", "foil", "market",
+                                    "quantity", "price", "status", "error_message", "listed_at", "badge"})
         sold = self.client.get(reverse("ledger:api_listings"), {"status": "sold"}).json()
         self.assertEqual(sold["status"], "sold")
         self.assertEqual({r["badge"]["label"] for r in sold["results"]}, {"Sold"})
@@ -919,7 +921,7 @@ class SaleApiTest(LedgerTestCase):
         self.assertEqual(resp.json(), {"quantity": [f"You only own {owned} {copies}."]})
 
     def test_new_listing_defaults(self):
-        item = CollectionItem.objects.filter(owner=self.user, listing__isnull=True).select_related("card").first()
+        item = CollectionItem.objects.filter(owner=self.user, listings__isnull=True).select_related("card").first()
         data = self.client.get(reverse("ledger:api_listing", args=[item.pk])).json()
         self.assertEqual(data["item"]["name"], item.card.name)
         self.assertEqual(data["item"]["quantity"], item.quantity)
@@ -962,11 +964,11 @@ class SyncTest(LedgerTestCase):
         self.assertEqual(resp.json()["messages"][0]["text"], f"Conflict on {conflict.item.card.name} resolved.")
         conflict.refresh_from_db()
         self.assertEqual(conflict.resolution, "remote")
-        self.assertEqual(conflict.item.listing.price, Decimal("0.70"))
+        self.assertEqual(conflict.item.listing_for().price, Decimal("0.70"))
 
     def test_keep_ledger_requeues(self):
         conflict = SyncConflict.objects.get(field="status")
-        listing = conflict.item.listing
+        listing = conflict.item.listing_for()
         listing.ct_product_id = 42
         listing.save()
         self.resolve(conflict, "ledger")
@@ -991,7 +993,7 @@ class SyncTest(LedgerTestCase):
         data = self.client.get(reverse("ledger:api_sync")).json()
         self.assertEqual(len(data["conflicts"]), 3)
         self.assertEqual(set(data["conflicts"][0]), {"id", "name", "set_code", "condition", "language", "service",
-                                                      "local_value", "remote_value"})
+                                                      "market", "local_value", "remote_value"})
         self.assertEqual(data["pending_changes"], 3)
         [ct] = data["connections"]
         self.assertEqual((ct["name"], ct["token_ok"], ct["open_conflicts"]), ("CardTrader", True, 3))
@@ -1027,7 +1029,7 @@ class ShipmentsTest(LedgerTestCase):
         self.sheoldred.refresh_from_db()
         self.assertEqual(self.sheoldred.quantity, 1)
         self.assertEqual(self.sheoldred.item.quantity, 1)
-        order = Order.objects.get(ct_id=1)
+        order = Order.objects.get(market_order_id=1)
         self.assertEqual(order.items.get().listing, self.sheoldred)
         self.assertEqual(order.total, Decimal("12.34"))
         self.assertEqual(order.address_lines, ["Ada", "Via Po 1", "10100 Torino TO", "Italy"])
@@ -1048,13 +1050,13 @@ class ShipmentsTest(LedgerTestCase):
         self.import_orders()
         self.ragavan.refresh_from_db()
         self.assertEqual(self.ragavan.item.quantity, 0)
-        self.assertTrue(Order.objects.get(ct_id=3).stock_applied)
-        self.assertFalse(Order.objects.get(ct_id=4).stock_applied)
+        self.assertTrue(Order.objects.get(market_order_id=3).stock_applied)
+        self.assertFalse(Order.objects.get(market_order_id=4).stock_applied)
 
     def test_ship_with_tracking(self):
         self.ct.orders = [order_payload(5, "paid", [(777, "Ragavan", 1)], tracked=True)]
         self.import_orders()
-        order = Order.objects.get(ct_id=5)
+        order = Order.objects.get(market_order_id=5)
         resp = self.ship(order, "")
         self.assertEqual(resp.status_code, 502)
         self.assertIn("need a tracking code", resp.json()["detail"])
@@ -1077,7 +1079,7 @@ class ShipmentsTest(LedgerTestCase):
     def test_save_tracking_only(self):
         self.ct.orders = [order_payload(6, "paid", [(777, "Ragavan", 1)])]
         self.import_orders()
-        order = Order.objects.get(ct_id=6)
+        order = Order.objects.get(market_order_id=6)
         resp = self.ship(order, "RR2IT", save_tracking=True)
         self.assertEqual(resp.json(), {"shipped": False, "messages": [
             {"level": "success", "text": "Tracking code saved on CardTrader."}]})
@@ -1106,7 +1108,7 @@ class ShipmentsTest(LedgerTestCase):
     def test_order_detail(self):
         self.ct.orders = [order_payload(1, "paid", [(self.sheoldred.ct_product_id, "Sheoldred", 1)])]
         self.import_orders()
-        order = Order.objects.get(ct_id=1)
+        order = Order.objects.get(market_order_id=1)
         data = self.client.get(reverse("ledger:api_order", args=[order.pk])).json()
         self.assertEqual(data["address_lines"], ["Ada", "Via Po 1", "10100 Torino TO", "Italy"])
         self.assertTrue(data["can_ship"])
@@ -1167,10 +1169,10 @@ class SellingIsolationTest(LedgerTestCase):
         mine.save()
         self.ct.orders = [order_payload(50, "paid", [(5001, "Lightning Bolt", 1), (5002, "Sheoldred", 1)])]
         services.sync_all(self.other)
-        order = Order.objects.get(ct_id=50)
+        order = Order.objects.get(market_order_id=50)
         self.assertEqual(order.owner, self.other)
-        self.assertEqual(order.items.get(ct_product_id=5001).listing, theirs)
-        self.assertIsNone(order.items.get(ct_product_id=5002).listing)
+        self.assertEqual(order.items.get(market_listing_id=5001).listing, theirs)
+        self.assertIsNone(order.items.get(market_listing_id=5002).listing)
         mine.refresh_from_db()
         self.assertEqual((mine.quantity, mine.item.quantity), (2, 2))
         theirs.refresh_from_db()

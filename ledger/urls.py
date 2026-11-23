@@ -2,6 +2,7 @@ from django.urls import path
 
 from .api import catalog as catalog_api
 from .api import collection as collection_api
+from .api import extension as extension_api
 from .api import games as games_api
 from .api import orders as orders_api
 from .api import overview as overview_api
@@ -21,6 +22,7 @@ urlpatterns = [
     path("api/collection/export/", collection_api.export_csv, name="api_export"),
     path("api/listings/", sale_api.listings, name="api_listings"),
     path("api/listings/publish/", sale_api.publish, name="api_publish"),
+    path("api/listings/bulk/", sale_api.bulk, name="api_listings_bulk"),
     path("api/listings/<int:item_pk>/", sale_api.listing, name="api_listing"),
     path("api/catalog/", catalog_api.catalog, name="api_catalog"),
     path("api/catalog/categories/", catalog_api.categories, name="api_catalog_categories"),
@@ -33,6 +35,15 @@ urlpatterns = [
     path("api/sync/", sync_api.sync, name="api_sync"),
     path("api/sync/run/", sync_api.run, name="api_sync_run"),
     path("api/sync/conflicts/<int:pk>/resolve/", sync_api.resolve, name="api_resolve"),
+    path("api/extension/pair/", extension_api.pair, name="api_extension_pair"),
+    path("api/extension/claim/", extension_api.claim, name="api_extension_claim"),
+    path("api/extension/tokens/", extension_api.tokens, name="api_extension_tokens"),
+    path("api/extension/tokens/<int:pk>/", extension_api.token, name="api_extension_token"),
+    path("api/extension/status/", extension_api.status, name="api_extension_status"),
+    path("api/extension/cardtrader-token/", extension_api.cardtrader_token, name="api_extension_cardtrader_token"),
+    path("api/extension/plan/", extension_api.plan, name="api_extension_plan"),
+    path("api/extension/report/", extension_api.report, name="api_extension_report"),
+    path("api/extension/shipped/", extension_api.shipped, name="api_extension_shipped"),
     path("api/scan/setup/", scan_api.setup, name="scan_api_setup"),
     path("api/scan/sessions/", scan_api.sessions, name="scan_api_sessions"),
     path("api/scan/sessions/<uuid:uid>/", scan_api.session_detail, name="scan_api_session"),
