@@ -1,8 +1,13 @@
 """The vision index of each game (cardledger_vision), loaded from the database and kept per process."""
 
+import cv2
 from cardledger_vision import Index
 
 from .models import GameVisionIndex
+
+# One OpenCV thread per process: each container runs several gunicorn workers, which would otherwise all spawn a
+# thread per core.
+cv2.setNumThreads(1)
 
 _cache = {}  # game.pk -> (sha256, Index)
 
