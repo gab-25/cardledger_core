@@ -358,7 +358,7 @@ class PagesTest(LedgerTestCase):
         self.assertEqual(data["stats"]["total"], 21)
         self.assertFalse(data["filtered"])
         counts = self.client.get(reverse("accounts:api_me")).json()["counts"]
-        self.assertEqual(counts, {"pending_changes": 3, "orders_to_ship": 2})
+        self.assertEqual((counts["pending_changes"], counts["orders_to_ship"]), (3, 2))
 
     def test_collection_filters(self):
         data = self.collection(q="seize")
@@ -662,7 +662,7 @@ class CollectionIsolationTest(LedgerTestCase):
         self.assertEqual(data["results"], [])
         self.assertEqual(data["sets"], [])
         self.assertEqual(self.client.get(reverse("accounts:api_me")).json()["counts"],
-                         {"pending_changes": 0, "orders_to_ship": 0})
+                         {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0})
 
     def test_item_of_other_user_is_404(self):
         item = CollectionItem.objects.filter(owner=self.user).first()

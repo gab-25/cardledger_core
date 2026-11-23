@@ -17,6 +17,8 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
+from accounts.models import seller_settings_of
+
 from .. import services
 from ..cardmarket import blueprint_value, trend_price
 from ..forms import BulkForm, CatalogItemForm, CsvImportForm, ItemForm
@@ -261,8 +263,9 @@ def _pct(pct):
 
 
 @doc(TAGS, "Act on several items of the game of ?game: set_location (location), delete, list (create or update a "
-           "listing to publish at trend × (1 + pct/100), rounded to 0.05) or reprice (the same, existing listings "
-           "only)", request=BULK, parameters=[GAME])
+           "listing to publish at trend × (1 + pct/100), rounded to the seller's price_rounding, default 0.05) or "
+           "reprice (the same, existing listings only); with the seller's hold_below_cost, an item whose new price "
+           "would be under its cost is skipped", request=BULK, parameters=[GAME])
 @api_view(["POST"])
 def bulk(request):
     game = game_param(request.query_params)
@@ -289,7 +292,10 @@ def bulk(request):
         return messages_response(msg("success", f"Removed {_plural(n, 'item')} from the collection."), count=n)
 
     pct = data["pct"] or Decimal("0")
-    result = services.list_at_trend(items.annotate(trend=trend_price()), pct, reprice=action == "reprice")
+    seller = seller_settings_of(request.user)
+    result = services.list_at_trend(items.annotate(trend=trend_price()), pct, reprice=action == "reprice",
+                                    step=Decimal(seller.price_rounding) if seller.price_rounding else None,
+                                    hold_below_cost=seller.hold_below_cost)
     verb = "Repriced" if action == "reprice" else "Listed"
     msgs = [msg("success", f"{verb} {_plural(result.listed, 'item')} at {_pct(pct)}.")]
     if result.no_trend:
@@ -298,6 +304,8 @@ def bulk(request):
         msgs.append(msg("warning", f"Skipped {_plural(result.no_copies, 'item')} with no copies left."))
     if result.no_listing:
         msgs.append(msg("warning", f"Skipped {_plural(result.no_listing, 'item')} without a listing."))
+    if result.below_cost:
+        msgs.append(msg("warning", f"Held {_plural(result.below_cost, 'item')} whose price would be below cost."))
     return messages_response(*msgs, count=result.listed)
 
 

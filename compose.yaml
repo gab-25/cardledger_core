@@ -16,6 +16,8 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
     ports:
       - "${APP_PORT:-8000}:8000"
+    volumes:
+      - media:/app/media  # uploaded files (the business logo)
     depends_on:
       db:
         condition: service_healthy
@@ -79,3 +81,4 @@ services:
 
 volumes:
   pgdata:
+  media:

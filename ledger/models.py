@@ -247,12 +247,13 @@ class SyncLog(models.Model):
     class Level(models.TextChoices):
         OK = "ok", "OK"
         WARNING = "warn", "Warning"
+        ERROR = "error", "Error"  # a sync or publish that failed (CardTrader unreachable, token rejected, ...)
 
     owner = models.ForeignKey(  # None: a global entry (the catalog sync)
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True, related_name="sync_logs",
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    level = models.CharField(max_length=4, choices=Level.choices, default=Level.OK)
+    level = models.CharField(max_length=5, choices=Level.choices, default=Level.OK)
     message = models.CharField(max_length=300)
 
     objects = SyncLogQuerySet.as_manager()
@@ -515,3 +516,19 @@ class ScanCapture(models.Model):
 
     def __str__(self):
         return f"{self.capture_id} → {self.line_id or '-'}"
+
+
+class MissingCardReport(models.Model):
+    """A user's report of a product missing from the catalog ("Report a missing card"), read in the admin."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="missing_card_reports")
+    game = models.ForeignKey(Game, on_delete=models.CASCADE, related_name="missing_card_reports")
+    q = models.CharField("search", max_length=200)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.game}: {self.q}"

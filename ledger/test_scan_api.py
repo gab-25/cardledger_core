@@ -853,7 +853,8 @@ class SchemaTest(LedgerTestCase):
         self.assertEqual(query("/api/overview/"), {"game"})
         self.assertEqual(query("/api/listings/"), {"status", "game"})
         self.assertEqual(query("/api/orders/"), {"tab"})
-        self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "game", "category", "owned", "page"})
+        self.assertEqual(query("/api/catalog/"), {"q", "set", "number", "game", "category", "owned", "rarity", "finish",
+                                                  "ordering", "page"})
         self.assertEqual(query("/api/catalog/categories/"), {"game"})
         self.assertNotIn("parameters", schema["paths"]["/api/collection/"]["post"])
 

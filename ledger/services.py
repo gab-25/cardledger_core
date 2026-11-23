@@ -496,17 +496,8 @@ class PublishResult:
     failed: list = field(default_factory=list)  # [(listing, reason)]
 
 
-def publish_pending(user, game=None):
-    """Push the listings of the user waiting to be published (of one game, or of all) to their CardTrader account."""
-    service = get_cardtrader(user)
-    pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
-    if game is not None:
-        pending = pending.filter(item__card__game=game)
-    listings = list(pending.select_related("item__card__game"))
-    result = PublishResult()
-    if not listings:
-        return result
-
+def _push_listings(user, listings, result):
+    """Create or update the listings on the user's CardTrader account, filling result."""
     with user_client(user) as client:
         resolution = resolve_blueprints(client, {l.item.card for l in listings})
         unmatched = {c.pk for c in resolution.unmatched}
@@ -544,6 +535,24 @@ def publish_pending(user, game=None):
                 else:
                     result.failed.append((listing, _job_error(outcome)))
 
+
+def publish_pending(user, game=None):
+    """Push the listings of the user waiting to be published (of one game, or of all) to their CardTrader account."""
+    service = get_cardtrader(user)
+    pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
+    if game is not None:
+        pending = pending.filter(item__card__game=game)
+    listings = list(pending.select_related("item__card__game"))
+    result = PublishResult()
+    if not listings:
+        return result
+
+    try:
+        _push_listings(user, listings, result)
+    except CardTraderError as exc:
+        _log(f"{CARDTRADER}: publish failed ({exc})", SyncLog.Level.ERROR, owner=user)
+        raise
+
     service.last_sync = timezone.now()
     service.save(update_fields=["last_sync"])
     _log(f"{CARDTRADER}: {result.published} listings published", owner=user)
@@ -555,11 +564,12 @@ def publish_pending(user, game=None):
 PRICE_STEP = Decimal("0.05")
 
 
-def price_over_trend(trend, pct):
-    """trend × (1 + pct/100), rounded to the nearest 0.05 (half up), never under 0.05."""
+def price_over_trend(trend, pct, step=None):
+    """trend × (1 + pct/100), rounded to the nearest step (default 0.05, half up), never under one step."""
+    step = step or PRICE_STEP
     price = trend * (1 + Decimal(pct) / 100)
-    price = (price / PRICE_STEP).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * PRICE_STEP
-    return max(price, PRICE_STEP).quantize(Decimal("0.01"))
+    price = (price / step).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * step
+    return max(price, step).quantize(Decimal("0.01"))
 
 
 @dataclass
@@ -568,10 +578,13 @@ class BulkListResult:
     no_trend: int = 0  # skipped: no Cardmarket trend
     no_copies: int = 0  # skipped (list): no copies left to sell
     no_listing: int = 0  # skipped (reprice): no active listing
+    below_cost: int = 0  # skipped (hold_below_cost): the new price would be under the item's cost
 
 
-def list_at_trend(items, pct, reprice=False):
-    """Put items on sale at price_over_trend(their trend, pct), as listings to publish.
+def list_at_trend(items, pct, reprice=False, step=None, hold_below_cost=False):
+    """Put items on sale at price_over_trend(their trend, pct, step), as listings to publish.
+
+    With hold_below_cost an item whose new price would be under its cost is skipped (left as it is).
 
     items must carry the `trend` annotation (cardmarket.trend_price()). list (reprice=False) creates the listing of
     an item without one (all its copies) and reprices an existing one; a sold listing is reopened as a new product.
@@ -591,7 +604,10 @@ def list_at_trend(items, pct, reprice=False):
         if not active and item.quantity < 1:
             result.no_copies += 1
             continue
-        price = price_over_trend(item.trend, pct)
+        price = price_over_trend(item.trend, pct, step)
+        if hold_below_cost and item.cost is not None and price < item.cost:
+            result.below_cost += 1
+            continue
         if listing is None:
             Listing.objects.create(item=item, price=price, quantity=item.quantity, status=Listing.Status.TO_PUBLISH)
         elif not active:  # sold out on CardTrader: a new product
@@ -766,9 +782,13 @@ def _diff_listings(service, products):
 def sync_all(user):
     """Import the user's orders (applying sold stock), then compare their listings with CardTrader."""
     service = get_cardtrader(user)
-    with user_client(user) as client:
-        import_orders(client, service)
-        conflicts = _diff_listings(service, client.my_products() or [])
+    try:
+        with user_client(user) as client:
+            import_orders(client, service)
+            conflicts = _diff_listings(service, client.my_products() or [])
+    except CardTraderError as exc:
+        _log(f"{CARDTRADER}: sync failed ({exc})", SyncLog.Level.ERROR, owner=user)
+        raise
     service.last_sync = timezone.now()
     service.save(update_fields=["last_sync"])
     if conflicts:

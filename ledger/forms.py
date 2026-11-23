@@ -4,6 +4,8 @@ from django import forms
 from django.db.models import F
 from django.db.models.functions import Now
 
+from accounts.models import seller_settings_of
+
 from . import catalog
 from .models import Blueprint, Card, CollectionItem, Condition, Language, Listing
 
@@ -43,11 +45,15 @@ class CatalogItemForm(forms.Form):
             raise forms.ValidationError("Unknown catalog product.")
         return bp
 
+    def _default_condition(self):
+        """The seller's default condition (settings), Near Mint when unset."""
+        return seller_settings_of(self.owner).default_condition or Condition.NEAR_MINT
+
     def save(self):
         """(item, merged): an identical stack of the owner's gets the copies."""
         data = self.cleaned_data
         bp = data["blueprint"]
-        condition, language, foil = data["condition"] or Condition.NEAR_MINT, data["language"] or Language.EN, data["foil"]
+        condition, language, foil = data["condition"] or self._default_condition(), data["language"] or Language.EN, data["foil"]
         if bp.is_product:
             condition, foil = PRODUCT_CONDITION, False
         card = catalog.card_for_blueprint(bp)

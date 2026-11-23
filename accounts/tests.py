@@ -33,7 +33,10 @@ class ProfileTest(TestCase):
         self.assertEqual(data["user"]["username"], "gab")
         self.assertEqual(data["user"]["full_name"], "")
         self.assertFalse(data["user"]["is_staff"])
-        self.assertEqual(data["counts"], {"pending_changes": 0, "orders_to_ship": 0})
+        self.assertEqual(data["counts"], {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0})
+        self.assertEqual(data["markets"], [{"code": "ct", "name": "CardTrader", "connected": False, "status": "off",
+                                            "last_sync": None}])
+        self.assertIsNone(data["prices_updated_at"])
 
     def test_pending_changes_per_game(self):
         from ledger.models import Listing
@@ -150,7 +153,7 @@ class LoginTest(TestCase):
         schema = resp.json()
         body = schema["paths"]["/api/auth/login/"]["post"]["requestBody"]["content"]["application/json"]["schema"]
         login = schema["components"]["schemas"][body["$ref"].rsplit("/", 1)[1]]
-        self.assertEqual(set(login["properties"]), {"username", "password"})
+        self.assertEqual(set(login["properties"]), {"username", "password", "remember"})
         self.assertEqual(set(login["required"]), {"username", "password"})
 
 

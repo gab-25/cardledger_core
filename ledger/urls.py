@@ -24,6 +24,7 @@ urlpatterns = [
     path("api/listings/<int:item_pk>/", sale_api.listing, name="api_listing"),
     path("api/catalog/", catalog_api.catalog, name="api_catalog"),
     path("api/catalog/categories/", catalog_api.categories, name="api_catalog_categories"),
+    path("api/catalog/report-missing/", catalog_api.report_missing, name="api_catalog_report_missing"),
     path("api/overview/", overview_api.overview, name="api_overview"),
     path("api/orders/", orders_api.orders, name="api_orders"),
     path("api/orders/import/", orders_api.import_orders, name="api_orders_import"),

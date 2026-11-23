@@ -88,7 +88,23 @@ There is no linter or formatter configured. Settings come only from the environm
   none) with `views` counts that honour the other filters. `POST /api/collection/bulk/` acts on the user's items of
   the game (`set_location`, `delete`, `list`/`reprice` through `services.list_at_trend`, priced by
   `price_over_trend`). `GET /api/overview/` (`ledger/api/overview.py`) is the dashboard: revenue and profit from the
-  global orders, stock value per game, the game's price movers. Price guide expressions for items (`trend_price`,
+  global orders, stock value per game, the game's price movers. The user's `accounts.SellerSettings` (created on
+  demand, `seller_settings_of`) feed it: `price_rounding` ("" = 0.05, else 0.05/0.10/0.50/1.00) is the bulk price
+  step, `hold_below_cost` skips items whose new price would be under their cost, `default_condition` is the add
+  form's default (`auto_import_orders`/`push_prices` are stored only). Catalog rows add `rarity`, `year` (expansion
+  release year), `sold_30d` (order items → listing → item → card's printing, last 30 days, canceled/merged orders
+  out), `owned_locations`; filters `rarity`, `finish=foil`, `ordering`; `rarities`, and `suggestion` (pg_trgm, the
+  game's closest name) when a search finds nothing; `POST /api/catalog/report-missing/` stores a
+  `MissingCardReport` (admin).
+- **Account extras** (`accounts/`): login takes the username or a unique email (case-insensitive), `remember`
+  false ends the session with the browser; password reset by email (`templates/accounts/`, link to the SPA's
+  `/login/reset/<uid>/<token>/`); `AuditEvent` (`record(user, kind, request)`: sign-in ok/failed on a known account,
+  password changed/reset, CardTrader token saved/removed; IP is `REMOTE_ADDR`) behind `GET /api/account/activity/`;
+  `BusinessDetails` (`business_of`; shop name and VAT stay on `Profile`) with the logo in the default storage
+  (`MEDIA_ROOT`, env `DJANGO_MEDIA_ROOT`, served by `config.views.media` under `/media/`; a compose volume).
+  `me` adds `counts.copies`/`live_listings` (per `?game`), `markets` (CardTrader: off without a token, never before
+  any sync, error when the user's latest `CardTrader:` log entry has `SyncLog.Level.ERROR`, written when a sync or
+  publish raises, else ok) and `prices_updated_at`. Price guide expressions for items (`trend_price`,
   `item_guide_price`, foil-aware) live in `ledger/cardmarket.py`.
 - **Scan pipeline**: photo → `ledger/openrouter.py` (vision model reads the card) → `ledger/recognition.py` (matches
   it to a `Blueprint` of the local catalog) → `ledger/scan.py` (draft lines of a `ScanSession`, saved into the
