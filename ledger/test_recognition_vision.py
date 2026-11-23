@@ -126,3 +126,13 @@ class EndToEndTest(LedgerTestCase):
         _, jpg = cv2.imencode(".jpg", np.full((600, 400, 3), 128, np.uint8))
         m = match_photo(jpg.tobytes(), vision.index_for(self.magic), self.magic, None)
         self.assertEqual(m.reason, "no_card")
+
+    def test_confirm_only_index_never_answers_ok(self):
+        GameVisionIndex.objects.filter(game=self.magic).delete()
+        GameVisionIndex.objects.create(
+            game=self.magic, sha256="d" * 64,
+            data=make_index(self.magic, [(self.bps[0], self.cards[0][0])], confirm_only=True),
+        )
+        vision._cache.clear()
+        m = match_photo(self.cards[0][1], vision.index_for(self.magic), self.magic, self.neo)
+        self.assertEqual((m.reason, m.blueprint, m.candidates), ("ambiguous", None, [self.bps[0]]))
