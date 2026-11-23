@@ -2,10 +2,10 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    """Drop the CardTrader-only ids (copied into the market ids by 0037) and add the per-market uniqueness."""
+    """Drop the CardTrader-only ids (copied into the market ids by 0039) and add the per-market uniqueness."""
 
     dependencies = [
-        ('ledger', '0037_markets_data'),
+        ('ledger', '0039_markets_data'),
     ]
 
     operations = [

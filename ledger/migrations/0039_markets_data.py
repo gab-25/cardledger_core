@@ -71,7 +71,7 @@ def backwards(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("ledger", "0036_markets_extension"),
+        ("ledger", "0038_markets_extension"),
     ]
 
     operations = [

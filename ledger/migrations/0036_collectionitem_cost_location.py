@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('ledger', '0033_scansession_game'),
+        ('ledger', '0035_scansession_default_language'),
     ]
 
     operations = [

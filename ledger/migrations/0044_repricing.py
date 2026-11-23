@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('ledger', '0041_backfill_shipments'),
+        ('ledger', '0043_backfill_shipments'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

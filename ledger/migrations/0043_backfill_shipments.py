@@ -29,7 +29,7 @@ def forwards(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("ledger", "0040_orders_packing_shipments"),
+        ("ledger", "0042_orders_packing_shipments"),
     ]
 
     operations = [

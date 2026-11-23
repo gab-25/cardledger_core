@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('ledger', '0039_no_cardtrader_token'),
+        ('ledger', '0041_no_cardtrader_token'),
     ]
 
     operations = [

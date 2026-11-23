@@ -111,7 +111,7 @@ only when the user presses Sync. The server never calls a market and stores no m
 - **Shipments**: orders to ship with packing number, address and printable packing list; the extension marks an order
   shipped on its market (with the tracking code) and tells the server (`POST /api/extension/shipped/`).
 
-Upgrading from a version with CardTrader tokens: migration 0039 deletes the stored tokens; pair the extension from the
+Upgrading from a version with CardTrader tokens: migration 0041 deletes the stored tokens; pair the extension from the
 Account page to keep syncing CardTrader.
 
 ## Card database and Cardmarket prices

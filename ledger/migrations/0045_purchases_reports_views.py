@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('ledger', '0042_repricing'),
+        ('ledger', '0044_repricing'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

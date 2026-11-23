@@ -425,8 +425,8 @@ class MeCountsTest(FlowTestCase):
 
 
 class ShipmentBackfillTest(TransactionTestCase):
-    BEFORE = [("ledger", "0040_orders_packing_shipments"), ("auth", "0012_alter_user_first_name_max_length")]
-    AFTER = [("ledger", "0041_backfill_shipments"), ("auth", "0012_alter_user_first_name_max_length")]
+    BEFORE = [("ledger", "0042_orders_packing_shipments"), ("auth", "0012_alter_user_first_name_max_length")]
+    AFTER = [("ledger", "0043_backfill_shipments"), ("auth", "0012_alter_user_first_name_max_length")]
 
     def tearDown(self):
         executor = MigrationExecutor(connection)

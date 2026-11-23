@@ -26,7 +26,7 @@ def forwards(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("ledger", "0038_markets_cleanup"),
+        ("ledger", "0040_markets_cleanup"),
     ]
 
     operations = [

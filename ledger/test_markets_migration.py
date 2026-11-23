@@ -1,4 +1,4 @@
-"""Listings, orders and conflicts become CardTrader's (migrations 0036-0038), and users with a CardTrader token get
+"""Listings, orders and conflicts become CardTrader's (migrations 0038-0040), and users with a CardTrader token get
 a CardTrader connection."""
 
 from django.db import connection
@@ -7,8 +7,8 @@ from django.test import TransactionTestCase
 from django.utils import timezone
 
 AUTH = ("auth", "0012_alter_user_first_name_max_length")
-BEFORE = [("ledger", "0035_alter_synclog_level_missingcardreport"), AUTH]
-AFTER = [("ledger", "0038_markets_cleanup"), AUTH]
+BEFORE = [("ledger", "0037_alter_synclog_level_missingcardreport"), AUTH]
+AFTER = [("ledger", "0040_markets_cleanup"), AUTH]
 
 
 class MarketsMigrationTest(TransactionTestCase):
@@ -80,11 +80,11 @@ class MarketsMigrationTest(TransactionTestCase):
 
 
 class NoTokenMigrationTest(TransactionTestCase):
-    """0039 drops SyncService (and the CardTrader tokens with it), keeping its sync times on the CardTrader
+    """0041 drops SyncService (and the CardTrader tokens with it), keeping its sync times on the CardTrader
     connection."""
 
-    BEFORE = [("ledger", "0038_markets_cleanup"), AUTH]
-    AFTER = [("ledger", "0039_no_cardtrader_token"), AUTH]
+    BEFORE = [("ledger", "0040_markets_cleanup"), AUTH]
+    AFTER = [("ledger", "0041_no_cardtrader_token"), AUTH]
 
     def setUp(self):
         self.executor = MigrationExecutor(connection)

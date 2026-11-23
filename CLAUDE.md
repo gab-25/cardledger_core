@@ -36,8 +36,7 @@ uv run python manage.py snapshot_stock_values    # today's stock value per user 
                                                  # after sync_catalog, which also runs it)
 ```
 
-There is no linter or formatter configured. Settings come only from the environment / `.env` (see `.env.example`);
-`OPENROUTER_API_KEY` and `OPENROUTER_MODEL` deliberately have no defaults in code.
+There is no linter or formatter configured. Settings come only from the environment / `.env` (see `.env.example`).
 
 ## Architecture
 
@@ -53,7 +52,7 @@ There is no linter or formatter configured. Settings come only from the environm
   (`ledger/test_ownership.py`). `SyncLog.objects.visible_to(user)` adds the global entries. The card catalog
   (`Expansion`, `Blueprint`) and prices are shared.
 - **No market tokens**: the server stores no Cardmarket or CardTrader credential and never calls either market (no
-  CardTrader client; `SyncService` and its tokens were dropped by migration 0039). Both markets are synced only by the
+  CardTrader client; `SyncService` and its tokens were dropped by migration 0041). Both markets are synced only by the
   browser extension (see Markets).
 - **Cards vs printings**: `Card` is the Ledger's own row (name + set + collector number) that `CollectionItem`
   points to, tied to its printing by `Card.cm_product_id`; `Blueprint` is a product of the local catalog, keyed by
@@ -95,8 +94,8 @@ There is no linter or formatter configured. Settings come only from the environm
   `SyncConflict.market`; `services.diff_listings(user, market, remote)` serves both markets. `MarketConnection(user,
   market)`: handle, status off|never|ok|error, last_sync, last_error, orders_synced_at (`services.connection`/
   `mark_synced`); `services.market_states(user)` is `me`'s, the extension's and the sync page's `markets`, both from
-  their connection only: off until pairing creates them, then the status the reports set. Data migrations 0036-0038
-  turned the existing rows into market "ct", 0039 dropped `SyncService` (tokens), `SyncConflict.service` and
+  their connection only: off until pairing creates them, then the status the reports set. Data migrations 0038-0040
+  turned the existing rows into market "ct", 0041 dropped `SyncService` (tokens), `SyncConflict.service` and
   `Game.ct_game_id` (`test_markets_migration.py`).
   Extension (`ledger/extension.py`, views `ledger/api/extension.py`, `/api/extension/`): pairing (`pair/` with the
   session → a 10-minute `ABCD-1234` code; `claim/` without session, rate-limited per IP in the cache → the raw token,
@@ -170,7 +169,7 @@ There is no linter or formatter configured. Settings come only from the environm
   once the order is sent/arrived/done, called by `services.save_order` (extension reports) and
   `extension.mark_shipped`; later calls only fill blanks (seller edits stay) and set `delivered_at` the first time
   the order is seen arrived/done. Carrier from the shipping method's words (`shipping.carrier_for`), `expected_by` =
-  shipped date + max_shipping_days calendar days (tracked 5 / untracked 10 when null). Migration 0041 backfilled the
+  shipped date + max_shipping_days calendar days (tracked 5 / untracked 10 when null). Migration 0043 backfilled the
   shipped orders (`test_orders_flow.ShipmentBackfillTest`). `Shipment.objects.with_status(today)` annotates `status`
   (returned > delivered (delivered_at or arrived/done) > no_tracking (untracked method and no code) > late (past
   expected_by) > in_transit) and `problem` (late, or no_tracking past expected_by). `GET /api/shipments/?tab=
@@ -188,13 +187,17 @@ There is no linter or formatter configured. Settings come only from the environm
   their MarketConnection, see Markets), `extension` and `prices_updated_at`; `GET /api/account/` is only
   `password_help`. Price guide expressions for items (`trend_price`,
   `item_guide_price`, foil-aware) live in `ledger/cardmarket.py`.
-- **Scan pipeline**: photo → `ledger/openrouter.py` (vision model reads the card) → `ledger/recognition.py` (matches
-  it to a `Blueprint` of the local catalog) → `ledger/scan.py` (draft lines of a `ScanSession`, saved into the
-  collection at the end; no prices, nothing is put on sale). `ScanSession.game` is set at creation and every later step
-  takes the game from the session: `recognition.match(rec, expansion, game)`, a per-game prompt
-  (`openrouter.prompt_for(slug)`), non-Magic names compared without a trailing ` [...]`/` (...)` catalog suffix,
-  `catalog.expansion_by_code` falling back to a single `<code>-…` slug code; the phone URL and the save redirect
-  carry `/<game>/`.
+- **Scan pipeline**: photo → `ledger/recognition.py` (`match_photo(photo, index, game, expansion)`: the
+  `cardledger_vision` library compares the card's image with the game's vision index, locked on the session's
+  expansion, and maps the Cardmarket ids it answers to the `Blueprint`s of the local catalog, dropping ids the catalog
+  lost) → `ledger/scan.py` (draft lines of a `ScanSession`, saved into the collection at the end; no prices, nothing
+  is put on sale; a line takes the session's language, never foil, and `read_name` is the best candidate's name, as
+  nothing is read from the card). No external service is called. The index of each game (`vision/v1/<slug>.bin` in
+  the catalog bucket, built by gab-25/cardledger_vision) is stored by the nightly sync in `GameVisionIndex` and loaded
+  by `vision.index_for(game)`, cached per process and reloaded when its sha256 changes; a game without one answers
+  `captures` with `ServiceMissing` (manual search still works). `ScanSession.game` is set at creation and every later
+  step takes the game from the session; `catalog.expansion_by_code` falls back to a single `<code>-…` slug code; the
+  phone URL and the save redirect carry `/<game>/`. Tests build real indexes with `ledger/test_vision_utils.py`.
   The scan API (`ledger/api/scan.py`) is the only one with real DRF serializers (`ledger/api/serializers.py`).
 - **API conventions** (`ledger/api/common.py`, `ledger/api/errors.py`): session auth + CSRF (`X-CSRFToken` from the
   `csrftoken` cookie); validation goes through Django forms and `form_errors(form)` turns them into DRF 400s;
