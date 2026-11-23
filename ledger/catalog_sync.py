@@ -236,14 +236,21 @@ def _sync_game(bucket, cm_client, game, problem=""):
         return _failure(game, f"{type(exc).__name__}: {exc}", unexpected=True)
 
 
-def sync(bucket, cm_client, problem=""):
+def sync(bucket, cm_client, problem="", on_result=None):
     """Sync every game, in slug order; a game that fails is told in its result and does not stop the others.
+    on_result(game, result), if given, is called as soon as each game is done.
 
     bucket None (or a problem) means the catalog files cannot be read: only the prices of the games that have a
     catalog are updated, and every result carries the problem."""
     if not problem and bucket is None:
         problem = "no catalog bucket"
-    return [_sync_game(bucket, cm_client, game, problem) for game in Game.objects.order_by("slug")]
+    results = []
+    for game in Game.objects.order_by("slug"):
+        result = _sync_game(bucket, cm_client, game, problem)
+        if on_result is not None:
+            on_result(game, result)
+        results.append(result)
+    return results
 
 
 def _summary(name, result):
@@ -275,8 +282,8 @@ def log_report(message, warning):
 
 
 def run_sync(bucket=None, cm_client=None, report=log_report):
-    """sync() with its outcome told to report(message, warning), one line per game, not to the SyncLog.
-    Returns the results.
+    """sync() with its outcome told to report(message, warning), one line per game as soon as that game is done,
+    not to the SyncLog. Returns the results.
 
     Without a usable bucket the prices are still updated. Raises CatalogSyncError, after reporting every game, when
     a game failed unexpectedly, so the command fails."""
@@ -287,8 +294,13 @@ def run_sync(bucket=None, cm_client=None, report=log_report):
         bucket, problem = None, str(exc)
     own_cm = cm_client is None
     cm_client = cm_client or cardmarket.make_client()
+
+    def report_game(game, result):
+        warning = bool(result.error or result.reconciled.clashes or result.vision not in VISION_OK)
+        report(_summary(game.name, result), warning)
+
     try:
-        results = sync(bucket, cm_client, problem)
+        results = sync(bucket, cm_client, problem, on_result=report_game)
     except Exception as exc:
         # Unexpected (database, bug): reported, and the command fails.
         report(f"Catalog sync failed: {type(exc).__name__}: {exc}", True)
@@ -296,10 +308,6 @@ def run_sync(bucket=None, cm_client=None, report=log_report):
     finally:
         if own_cm:
             cm_client.close()
-    names = dict(Game.objects.values_list("slug", "name"))
-    for result in results:
-        warning = bool(result.error or result.reconciled.clashes or result.vision not in VISION_OK)
-        report(_summary(names[result.game], result), warning)
     failed = [r.game for r in results if r.unexpected]
     if failed:
         raise CatalogSyncError(f"unexpected failure in: {', '.join(failed)}")
