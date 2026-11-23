@@ -61,10 +61,10 @@ class MapTest(LedgerTestCase):
             m = match_photo(PHOTO, None, self.magic, None)
         self.assertEqual((m.reason, m.blueprint, m.candidates), ("no_card", None, []))
 
-    def test_not_found_keeps_nearest_candidates(self):
-        with fake("not_found", None, [self.a.cm_product_id]):
+    def test_not_found_drops_the_unrelated_nearest_candidates(self):
+        with fake("not_found", None, [self.a.cm_product_id, self.b.cm_product_id]):
             m = match_photo(PHOTO, None, self.magic, None)
-        self.assertEqual((m.reason, m.candidates), ("ambiguous", [self.a]))
+        self.assertEqual((m.reason, m.blueprint, m.candidates), ("not_found", None, []))
 
 
 class IndexForTest(LedgerTestCase):

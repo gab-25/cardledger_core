@@ -135,8 +135,9 @@ def match_photo(photo, index, game, expansion):
     None. Ids the catalog no longer has are dropped; a certain id that is gone leaves its candidates to confirm.
     reason: ok | ambiguous | not_found | no_card."""
     result = recognize(photo, index, lock=expansion.code if expansion is not None else None)
-    if result.outcome == "no_card":
-        return Match(None, [], "no_card")
+    if result.outcome in ("no_card", "not_found"):
+        # not_found: nothing is close to the photo, its candidates are unrelated nearest entries: show none.
+        return Match(None, [], result.outcome)
     found = {
         b.cm_product_id: b
         for b in Blueprint.objects.filter(expansion__game=game, cm_product_id__in=result.candidates)
@@ -145,7 +146,5 @@ def match_photo(photo, index, game, expansion):
     candidates = [found[i] for i in result.candidates if i in found]
     if result.outcome == "ok" and result.product_id in found:
         return Match(found[result.product_id], candidates, "ok")
-    if result.outcome == "not_found" and not candidates:
-        return Match(None, [], "not_found")
-    # A certain id the catalog lost, or an ambiguous answer: the owner picks among what is left.
+    # A certain id the catalog lost (outcome ok), or an ambiguous answer: the owner picks among what is left.
     return Match(None, candidates, "ambiguous" if candidates else "not_found")
