@@ -136,7 +136,7 @@ class MeTest(TestCase):
         self.assertEqual(self.me()["counts"]["copies"], 2)
         self.assertEqual(self.me(game="pokemon")["counts"], {"pending_changes": 0, "orders_to_ship": 0,
                                                              "copies": 2, "live_listings": 1, "orders_to_pack": 0,
-                                                             "shipment_problems": 0})
+                                                             "shipment_problems": 0, "rules_on": 0, "rules_total": 0})
         self.assertEqual(self.me(game="mtg")["counts"]["copies"], 0)
         self.assertEqual(self.me(game="mtg")["counts"]["live_listings"], 0)
         self.client.force_login(self.other)
@@ -272,14 +272,14 @@ class SellerSettingsTest(TestCase):
     def test_defaults(self):
         self.assertEqual(self.client.get(self.url).json(), {
             "auto_import_orders": True, "push_prices": True, "hold_below_cost": False, "default_condition": "NM",
-            "price_rounding": ""})
+            "price_rounding": "", "reprice_before_sync": False})
 
     def test_partial_put(self):
         self.assertEqual(self.put({"hold_below_cost": True, "price_rounding": "0.10"}).status_code, 200)
         self.put({"auto_import_orders": False})
         self.assertEqual(self.client.get(self.url).json(), {
             "auto_import_orders": False, "push_prices": True, "hold_below_cost": True, "default_condition": "NM",
-            "price_rounding": "0.10"})
+            "price_rounding": "0.10", "reprice_before_sync": False})
         self.client.force_login(self.other)
         self.assertFalse(self.client.get(self.url).json()["hold_below_cost"])
 

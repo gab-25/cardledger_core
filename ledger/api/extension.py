@@ -12,8 +12,10 @@ from rest_framework.exceptions import AuthenticationFailed, NotFound, Throttled,
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from .. import extension, services
-from ..models import ExtensionToken, Market
+from accounts.models import seller_settings_of
+
+from .. import extension, repricer, services
+from ..models import ExtensionToken, Market, RepricingRun
 from .common import body, doc, messages_response, msg, query
 
 TAGS = ["extension"]
@@ -139,11 +141,15 @@ def _market_param(value):
     return value
 
 
-@doc(TAGS, "Extension: the listings to create, update or delete on a market",
+@doc(TAGS, "Extension: the listings to create, update or delete on a market (with the seller's "
+           "reprice_before_sync, the repricing rules run first on that market's listings)",
      parameters=[query("market", "cm: Cardmarket, ct: CardTrader", enum=Market.values)])
 @token_view(["GET"])
 def plan(request):
-    return Response(extension.plan(request.user, _market_param(request.query_params.get("market", ""))))
+    market = _market_param(request.query_params.get("market", ""))
+    if seller_settings_of(request.user).reprice_before_sync:
+        repricer.run(request.user, trigger=RepricingRun.Trigger.SYNC, market=market)
+    return Response(extension.plan(request.user, market))
 
 
 class ResultSerializer(serializers.Serializer):

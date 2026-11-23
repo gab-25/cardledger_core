@@ -25,7 +25,7 @@ from ledger.api.common import (GAME, doc, form_body, form_errors, form_fields, g
 from ledger.api.orders import to_pack_count
 from ledger.api.shipments import problem_count
 from ledger.extension import extension_state
-from ledger.models import CardmarketPrice, CollectionItem, Listing, Order
+from ledger.models import CardmarketPrice, CollectionItem, Listing, Order, RepricingRule
 
 from .forms import BusinessForm, BusinessProfileForm, LoginForm, LogoForm, ProfileForm, SellerSettingsForm
 from .models import AuditEvent, business_of, profile_of, record, seller_settings_of
@@ -51,7 +51,8 @@ def _user(user):
 
 @doc(TAGS, "The logged-in user, the sidebar counters (?game limits pending_changes, copies and live_listings to a "
            "game; orders_to_pack: to pack or being picked, shipment_problems: late or untracked past their expected "
-           "date, both of every market), the marketplaces' state (Cardmarket and CardTrader, with the seller handle), whether the browser "
+           "date, both of every market; rules_on: enabled repricing rules that are not drafts, rules_total: all "
+           "of them), the marketplaces' state (Cardmarket and CardTrader, with the seller handle), whether the browser "
            "extension is paired (and when it was last seen) and the date of the latest Cardmarket price guide. "
            "Each market's status is its connection's (both are synced by the extension): off until the extension is "
            "paired, never (never synced), ok, error (the last sync failed)",
@@ -62,6 +63,7 @@ def me(request):
     pending = Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH)
     live = Listing.objects.owned_by(user).filter(status=Listing.Status.PUBLISHED, pending_delete=False)
     items = CollectionItem.objects.owned_by(user)
+    rules = RepricingRule.objects.owned_by(user)
     if request.query_params.get("game", "").strip():
         game = game_param(request.query_params)
         pending = pending.filter(item__card__game=game)
@@ -76,6 +78,8 @@ def me(request):
             "live_listings": live.count(),
             "orders_to_pack": to_pack_count(user),
             "shipment_problems": problem_count(user),
+            "rules_on": rules.filter(enabled=True, draft=False).count(),
+            "rules_total": rules.count(),
         },
         "markets": ledger_services.market_states(user),
         "extension": extension_state(user),
@@ -265,8 +269,9 @@ def _seller_settings(settings):
 
 
 @doc(TAGS, "The seller settings (GET) or change them (PUT; a key left out keeps its value). hold_below_cost and "
-           "price_rounding apply to the bulk list/reprice of the collection, default_condition to adding from the "
-           "catalog", request=form_body("SellerSettings", SellerSettingsForm))
+           "price_rounding apply to the bulk list/reprice of the collection and to the repricing rules, "
+           "default_condition to adding from the catalog, reprice_before_sync runs the rules before each extension "
+           "plan", request=form_body("SellerSettings", SellerSettingsForm))
 @api_view(["GET", "PUT"])
 def seller_settings(request):
     settings = seller_settings_of(request.user)

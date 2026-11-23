@@ -118,12 +118,37 @@ There is no linter or formatter configured. Settings come only from the environm
   `POST /api/listings/bulk/` pauses/resumes/deletes the listings of item ids (optionally of one market). `GET /api/overview/` (`ledger/api/overview.py`) is the dashboard: revenue and profit from the
   global orders, stock value per game, the game's price movers. The user's `accounts.SellerSettings` (created on
   demand, `seller_settings_of`) feed it: `price_rounding` ("" = 0.05, else 0.05/0.10/0.50/1.00) is the bulk price
-  step, `hold_below_cost` skips items whose new price would be under their cost, `default_condition` is the add
-  form's default (`auto_import_orders`/`push_prices` are stored only). Catalog rows add `rarity`, `year` (expansion
+  step, `hold_below_cost` skips items whose new price would be under their cost (the repricing rules raise to it instead; both use price_rounding), `default_condition` is the add
+  form's default, `reprice_before_sync` see Repricing (`auto_import_orders`/`push_prices` are stored only). Catalog rows add `rarity`, `year` (expansion
   release year), `sold_30d` (order items → listing → item → card's printing, last 30 days, canceled/merged orders
   out), `owned_locations`; filters `rarity`, `finish=foil`, `ordering`; `rarities`, and `suggestion` (pg_trgm, the
   game's closest name) when a search finds nothing; `POST /api/catalog/report-missing/` stores a
   `MissingCardReport` (admin).
+- **Repricing** (engine `ledger/repricing.py`, pure, no database; DB side `ledger/repricer.py`; views
+  `ledger/api/repricing.py`, `/api/repricing/`): prices are computed only here (no market call); a changed price on a
+  published listing goes back to to_publish so the next extension sync pushes it. `RepricingRule(user, name, position
+  1-based, kind price|floor|over_time, markets all|cm|ct, conditions [{field, op, value}] validated and normalized by
+  `forms.clean_conditions` (fields/ops in `repricing.CONDITION_OPS`), reference trend|low|avg7|avg30 (Cardmarket guide,
+  foil-aware via the card's `cm_product_id`)|cost|other_market (the item's active listing on the other market)|current,
+  adjust_pct, adjust_abs, round_to ("" = seller price_rounding, default 0.05), interval_days, enabled, draft)`.
+  `repricing.evaluate` per listing (to_publish, published, paused; not error/sold/pending_delete): the first active
+  price/over_time rule that applies (markets + conditions + its reference has a value) sets the candidate; then every
+  matching floor (highest wins); then `hold_below_cost` (raise to cost); then the market minimum (cm 0.02, ct 0.01);
+  rounding last (nearest step, up when a floor/cost/minimum binds); a price nothing set or raised stays exact; moves
+  under €0.01 are ignored. Over-time: one step (current × (1 + pct/100) + abs) once `listed_days ≥ interval_days`
+  and `Listing.last_step_at` is ≥ interval_days ago (set by the run). `RepricingRun(user, trigger manual|sync|adhoc,
+  counts, value_delta = Σ (new - old) × quantity, blocked)` + `RepricingChange` (copies the listing's name etc. and the
+  rule names so a run stays readable); the last 50 runs per user are kept (`repricer.KEEP_RUNS`). Endpoints: `rules/`
+  (GET with stats matched/last_moved/last_blocked, POST), `rules/<id>/` (PATCH partial, `position` moves; DELETE
+  renumbers), `rules/reorder/`, `rules/preview/` (unsaved rule at its position: matched/moves/up/down), `preview/`
+  (dry run: totals, 5 biggest, paged changes, `?market` limits only the results), `run/`, `runs/`, `runs/<id>/`,
+  `quote/?blueprint=` (per market; no matching price rule: the Cardmarket trend as fallback), `adhoc/` (ids, mode
+  trend_pct|change|set, basis, markets; floors/cost/minimum apply; dry_run or apply → listings to publish, an adhoc
+  run). `SellerSettings.reprice_before_sync`: `extension/plan/?market=` runs the rules on that market first (trigger
+  sync). `POST /api/collection/` takes `cost`, `location`, `list_on` (markets: `repricer.list_new_copies` lists the
+  copies added at the quoted price; a merged stack adds them to its active listing). `me.counts` adds `rules_on`
+  (enabled, not draft) and `rules_total`. The old collection bulk list/reprice (`services.list_at_trend`) still works
+  as before.
 - **Orders pick/pack/ship** (`ledger/api/orders.py`, helpers `ledger/shipping.py`): `Order.packed_at`, `issue_note`/
   `issue_at`, `invoice_number`, `OrderItem.picked`. `Order.objects.with_stage()` annotates `stage` (first that
   applies): issue (an issue note, request_for_cancel, lost, canceled with paid_at), shipped (sent/arrived/done, also

@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from datetime import timedelta
 
+from django.db import transaction
 from django.db.models import Count, DecimalField, ExpressionWrapper, F, OuterRef, Q, Subquery, Sum
 from django.db.models.functions import Now
 from django.http import HttpResponse
@@ -19,7 +20,7 @@ from rest_framework.response import Response
 
 from accounts.models import seller_settings_of
 
-from .. import services
+from .. import repricer, services
 from ..cardmarket import blueprint_value, trend_price
 from ..forms import BulkForm, CatalogItemForm, CsvImportForm, ItemForm
 from ..models import Card, Category, CollectionItem, Condition, Language, Listing, Market, SyncLog
@@ -200,7 +201,8 @@ def _collection(request):
 
 
 @doc(TAGS, "The collection (GET: ?q, foil, set, cond, category, location, view, page) or add a catalog product to it "
-           "(POST)", request=CATALOG_ITEM)
+           "(POST; with cost, location, and list_on: listings to publish of the copies added on those markets at "
+           "the price the repricing rules quote)", request=CATALOG_ITEM)
 @extend_schema(methods=["GET"], parameters=[
     query("q", "Name or exact set code"),
     query("foil", "1: foils only", enum=["1"]),
@@ -221,13 +223,22 @@ def collection(request):
     form = CatalogItemForm(request.data, owner=request.user)
     if not form.is_valid():
         raise form_errors(form)
-    item, merged = form.save()
-    added = form.cleaned_data["quantity"]
-    if merged:
-        return messages_response(msg("success", f"Added {added}× {item.card.name} to the copies you already had."),
-                                 id=item.pk)
-    return messages_response(msg("success", f"Added {added}× {item.card.name}."),
-                             status=status.HTTP_201_CREATED, id=item.pk)
+    with transaction.atomic():
+        item, merged = form.save()
+        added = form.cleaned_data["quantity"]
+        listed, skipped = [], []
+        if form.cleaned_data.get("list_on"):
+            listed, skipped = repricer.list_new_copies(request.user, item, form.cleaned_data["blueprint"],
+                                                       form.cleaned_data["list_on"], added)
+    text = (f"Added {added}× {item.card.name} to the copies you already had." if merged
+            else f"Added {added}× {item.card.name}.")
+    if listed:
+        text += f" Listed on {' and '.join(listed)}."
+    msgs = [msg("success", text)]
+    if skipped:
+        msgs.append(msg("warning", f"Not listed on {' and '.join(skipped)}: no price (no rule and no Cardmarket "
+                                   "trend)."))
+    return messages_response(*msgs, status=status.HTTP_200_OK if merged else status.HTTP_201_CREATED, id=item.pk)
 
 
 @doc(TAGS, "One collection item: read (GET), change its copies (PUT) or remove it (DELETE)", request=ITEM)

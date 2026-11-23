@@ -485,7 +485,7 @@ class CollectionIsolationTest(LedgerTestCase):
         self.assertEqual(data["sets"], [])
         self.assertEqual(self.client.get(reverse("accounts:api_me")).json()["counts"],
                          {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0,
-                          "orders_to_pack": 0, "shipment_problems": 0})
+                          "orders_to_pack": 0, "shipment_problems": 0, "rules_on": 0, "rules_total": 0})
 
     def test_item_of_other_user_is_404(self):
         item = CollectionItem.objects.filter(owner=self.user).first()

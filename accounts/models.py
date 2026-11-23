@@ -63,6 +63,9 @@ class SellerSettings(models.Model):
     price_rounding = models.CharField(
         max_length=10, blank=True, help_text='Step bulk prices are rounded to, e.g. "0.05"; empty: the default 0.05',
     )
+    reprice_before_sync = models.BooleanField(
+        default=False, help_text="Run the repricing rules right before each extension sync (its plan)",
+    )
 
     class Meta:
         verbose_name_plural = "seller settings"

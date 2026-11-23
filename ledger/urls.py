@@ -5,6 +5,7 @@ from .api import collection as collection_api
 from .api import extension as extension_api
 from .api import games as games_api
 from .api import orders as orders_api
+from .api import repricing as repricing_api
 from .api import overview as overview_api
 from .api import sale as sale_api
 from .api import shipments as shipments_api
@@ -38,6 +39,16 @@ urlpatterns = [
     path("api/orders/<int:pk>/issue/", orders_api.issue, name="api_order_issue"),
     path("api/shipments/", shipments_api.shipments, name="api_shipments"),
     path("api/shipments/<int:pk>/", shipments_api.shipment, name="api_shipment"),
+    path("api/repricing/rules/", repricing_api.rules, name="api_repricing_rules"),
+    path("api/repricing/rules/reorder/", repricing_api.reorder, name="api_repricing_reorder"),
+    path("api/repricing/rules/preview/", repricing_api.rule_preview, name="api_repricing_rule_preview"),
+    path("api/repricing/rules/<int:pk>/", repricing_api.rule, name="api_repricing_rule"),
+    path("api/repricing/preview/", repricing_api.preview, name="api_repricing_preview"),
+    path("api/repricing/run/", repricing_api.run, name="api_repricing_run"),
+    path("api/repricing/runs/", repricing_api.runs, name="api_repricing_runs"),
+    path("api/repricing/runs/<int:pk>/", repricing_api.run_detail, name="api_repricing_run_detail"),
+    path("api/repricing/quote/", repricing_api.quote, name="api_repricing_quote"),
+    path("api/repricing/adhoc/", repricing_api.adhoc, name="api_repricing_adhoc"),
     path("api/sync/", sync_api.sync, name="api_sync"),
     path("api/sync/conflicts/<int:pk>/resolve/", sync_api.resolve, name="api_resolve"),
     path("api/extension/pair/", extension_api.pair, name="api_extension_pair"),

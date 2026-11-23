@@ -188,6 +188,7 @@ SPECTACULAR_SETTINGS = {
         'MarketEnum': 'ledger.models.Market',
         'LanguageEnum': 'ledger.models.Language',
         'ScanSessionStatusEnum': 'ledger.models.ScanSession.Status',
+        'RuleMarketsEnum': 'ledger.models.RepricingRule.Markets',
     },
     'SWAGGER_UI_DIST': 'SIDECAR',
     'SWAGGER_UI_FAVICON_HREF': 'SIDECAR',

@@ -11,7 +11,7 @@ from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
 from .models import (
-    ExtensionToken,
+    ExtensionToken, RepricingRule, RepricingRun,
     Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, Shipment, SyncConflict, SyncLog,
 )
 from .tests import LedgerTestCase, game
@@ -137,6 +137,7 @@ class OwnerIsolationSweepTest(LedgerTestCase):
         "scan_api_save": lambda t: t.session.uuid,
         "scan_api_line": lambda t: t.line.uuid, "scan_api_undo": lambda t: t.line.uuid,
         "scan_api_confirm": lambda t: t.line.uuid, "scan_api_frame": lambda t: t.line.uuid,
+        "api_repricing_rule": lambda t: t.rule.pk, "api_repricing_run_detail": lambda t: t.run.pk,
     }
 
     def setUp(self):
@@ -149,6 +150,8 @@ class OwnerIsolationSweepTest(LedgerTestCase):
         self.session = ScanSession.objects.create(owner=self.user, game=game())
         self.line = ScanLine.objects.create(session=self.session, condition="NM", frame=b"jpeg")
         self.ext_token = ExtensionToken.objects.create(user=self.user, key="0" * 64, name="Chrome")
+        self.rule = RepricingRule.objects.create(user=self.user, name="gab's")
+        self.run = RepricingRun.objects.create(user=self.user)
         self.client.force_login(self.other)
 
     def test_every_object_url_is_covered(self):

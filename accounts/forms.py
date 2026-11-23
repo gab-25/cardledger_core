@@ -114,7 +114,8 @@ class SellerSettingsForm(forms.ModelForm):
 
     class Meta:
         model = SellerSettings
-        fields = ["auto_import_orders", "push_prices", "hold_below_cost", "default_condition", "price_rounding"]
+        fields = ["auto_import_orders", "push_prices", "hold_below_cost", "default_condition", "price_rounding",
+                  "reprice_before_sync"]
 
     def __init__(self, data=None, *args, instance=None, **kwargs):
         super().__init__(keep_absent(data, instance, self.Meta.fields), *args, instance=instance, **kwargs)

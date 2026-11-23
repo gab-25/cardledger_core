@@ -211,6 +211,9 @@ class Listing(models.Model):
         default=False, help_text="Removed by the user while on the market: the next sync deletes it there, then here",
     )
     sold_at = models.DateTimeField(null=True, blank=True)
+    last_step_at = models.DateTimeField(
+        null=True, blank=True, help_text="When an over-time repricing rule last changed its price",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = owned_manager("item__owner")
@@ -769,3 +772,122 @@ class ExtensionRun(models.Model):
 
     def __str__(self):
         return f"{self.market} run {self.run_id}"
+
+
+class RepricingRule(models.Model):
+    """A rule of the user's that sets listing prices in CardLedger (ledger/repricing.py evaluates them by position)."""
+
+    class Kind(models.TextChoices):
+        PRICE = "price", "Price"
+        FLOOR = "floor", "Floor"
+        OVER_TIME = "over_time", "Over time"
+
+    class Markets(models.TextChoices):
+        ALL = "all", "All markets"
+        CARDMARKET = "cm", "Cardmarket"
+        CARDTRADER = "ct", "CardTrader"
+
+    class Reference(models.TextChoices):
+        TREND = "trend", "Cardmarket trend"
+        LOW = "low", "Cardmarket low"
+        AVG7 = "avg7", "Cardmarket 7-day average"
+        AVG30 = "avg30", "Cardmarket 30-day average"
+        COST = "cost", "Cost"
+        OTHER_MARKET = "other_market", "Price on the other market"
+        CURRENT = "current", "Current price"
+
+    class RoundTo(models.TextChoices):
+        SELLER = "", "Seller setting"
+        CENT = "0.01", "0.01"
+        FIVE = "0.05", "0.05"
+        TEN = "0.10", "0.10"
+        FIFTY = "0.50", "0.50"
+        ONE = "1.00", "1.00"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="repricing_rules")
+    name = models.CharField(max_length=100)
+    position = models.PositiveIntegerField(default=1, help_text="1-based order: the first matching price rule wins")
+    kind = models.CharField(max_length=10, choices=Kind.choices, default=Kind.PRICE)
+    markets = models.CharField(max_length=3, choices=Markets.choices, default=Markets.ALL)
+    conditions = models.JSONField(default=list, blank=True, help_text="[{field, op, value}]; empty: any listing")
+    reference = models.CharField(max_length=12, choices=Reference.choices, default=Reference.TREND)
+    adjust_pct = models.DecimalField(max_digits=7, decimal_places=2, default=0)
+    adjust_abs = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    round_to = models.CharField(max_length=4, choices=RoundTo.choices, blank=True)
+    interval_days = models.PositiveIntegerField(null=True, blank=True, help_text="Over time: one step every N days")
+    enabled = models.BooleanField(default=True)
+    draft = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["position", "id"]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def active(self):
+        return self.enabled and not self.draft
+
+
+class RepricingRun(models.Model):
+    """One application of the repricing rules (or of an ad-hoc reprice); the last 50 per user are kept."""
+
+    class Trigger(models.TextChoices):
+        MANUAL = "manual", "Run now"
+        SYNC = "sync", "Before a sync"
+        ADHOC = "adhoc", "Ad-hoc reprice"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="repricing_runs")
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    trigger = models.CharField(max_length=6, choices=Trigger.choices, default=Trigger.MANUAL)
+    dry_run = models.BooleanField(default=False)
+    changes = models.PositiveIntegerField(default=0)
+    raised = models.PositiveIntegerField(default=0)
+    lowered = models.PositiveIntegerField(default=0)
+    value_delta = models.DecimalField(max_digits=12, decimal_places=2, default=0,
+                                      help_text="Sum of (new - old price) × quantity")
+    blocked = models.PositiveIntegerField(default=0, help_text="Listings a floor or the cost held up")
+
+    objects = owned_manager("user")
+
+    class Meta:
+        ordering = ["-started_at", "-id"]
+
+    def __str__(self):
+        return f"{self.get_trigger_display()} {self.started_at:%Y-%m-%d %H:%M}"
+
+
+class RepricingChange(models.Model):
+    """One listing price a run changed; the listing's description is copied so the run stays readable."""
+
+    run = models.ForeignKey(RepricingRun, on_delete=models.CASCADE, related_name="price_changes")
+    listing = models.ForeignKey(Listing, null=True, blank=True, on_delete=models.SET_NULL,
+                                related_name="repricing_changes")
+    market = models.CharField(max_length=2, choices=Market.choices)
+    old_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+                                    help_text="None: the listing was created")
+    new_price = models.DecimalField(max_digits=10, decimal_places=2)
+    rule = models.ForeignKey(RepricingRule, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    floor_rule = models.ForeignKey(RepricingRule, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    blocked_by_floor = models.BooleanField(default=False)
+    item_pk = models.PositiveIntegerField(null=True, blank=True, help_text="The collection item")
+    name = models.CharField(max_length=200, blank=True)
+    set_code = models.CharField(max_length=40, blank=True)
+    condition = models.CharField(max_length=2, blank=True)
+    language = models.CharField(max_length=3, blank=True)
+    foil = models.BooleanField(default=False)
+    rule_name = models.CharField(max_length=100, blank=True)
+    floor_rule_name = models.CharField(max_length=100, blank=True)
+
+    objects = owned_manager("run__user")
+
+    class Meta:
+        ordering = ["name", "market", "id"]
+
+    def __str__(self):
+        return f"{self.name} {self.market}: {self.old_price} → {self.new_price}"

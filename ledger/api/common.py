@@ -47,6 +47,8 @@ def _form_field(field):
         return serializers.DecimalField(max_digits=field.max_digits, decimal_places=field.decimal_places, **kwargs)
     if isinstance(field, forms.IntegerField):
         return serializers.IntegerField(min_value=field.min_value, max_value=field.max_value, **kwargs)
+    if isinstance(field, forms.JSONField):  # before CharField, its parent
+        return serializers.JSONField(**kwargs)
     if isinstance(field, forms.FileField):
         return serializers.FileField(**kwargs)
     kwargs.update(max_length=field.max_length, allow_blank=not field.required)
