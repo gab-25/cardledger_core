@@ -7,7 +7,7 @@ import httpx
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
@@ -326,8 +326,6 @@ def load_demo(owner):
         SyncLog.objects.create(owner=owner, level=SyncLog.Level.WARNING, message="CardTrader: 3 prices differ from Ledger")
 
 
-# Tests never use the real keys from the environment or a local .env file.
-@override_settings(OPENROUTER_API_KEY="")
 class LedgerTestCase(TestCase):
     def setUp(self):
         cache.clear()

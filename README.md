@@ -1,7 +1,7 @@
 # cardledger_core
 CardLedger — trading card collection and CardTrader sales manager (Django).
 
-This repository is the server: the data, the CardTrader and OpenRouter integrations and a JSON API under `/api/`.
+This repository is the server: the data, the CardTrader integration, card recognition and a JSON API under `/api/`.
 The interface is a React single-page app in [cardledger_ui](https://github.com/gab-25/cardledger_ui); Django serves
 its `index.html` for every page URL and its assets under `/static/ui/`.
 
@@ -74,7 +74,7 @@ docker run -p 8000:8000 \
 Environment variables: the `POSTGRES_*` ones above, `DJANGO_SECRET_KEY`, `DJANGO_DEBUG` (default `false` in the image),
 `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` (comma-separated), `DJANGO_BEHIND_HTTPS_PROXY` (`true` when a
 reverse proxy terminates HTTPS and sets `X-Forwarded-Proto`), `GUNICORN_WORKERS`,
-`OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `CELERY_BROKER_URL` (default `redis://localhost:6379/0`), and for the catalog
+`CELERY_BROKER_URL` (default `redis://localhost:6379/0`), and for the catalog
 files `CARDLEDGER_CATALOG_BUCKET`, `CARDLEDGER_CATALOG_ENDPOINT` (only for S3-compatible storage, empty = AWS),
 `CARDLEDGER_CATALOG_REGION` (empty = `us-east-1`, `auto` for Cloudflare R2), `CARDLEDGER_CATALOG_ACCESS_KEY_ID` and
 `CARDLEDGER_CATALOG_SECRET_ACCESS_KEY` (the `AWS_*` variables are never read); see below.
@@ -130,7 +130,9 @@ Cardmarket's public price guide of each game (low, trend, average and the
 1/7/30-day averages, regular and foil or holo) and matches your cards to the catalog printings, game by game; it logs
 how many cards have no printing. Scryfall and Cardmarket's product lists are no longer read by the app, and no token
 is needed. The app only needs read access to the bucket (`s3:GetObject`, plus `s3:ListBucket` so a missing key is
-reported as missing).
+reported as missing). Each game's vision index for camera recognition (`vision/v1/<slug>.bin`, uploaded with
+`cardledger-vision upload`) is downloaded from the same bucket and stored when it changed; a missing or unreadable
+index keeps the previous one.
 
 - **Cards** page: search the card database by name, set code or collector number (or only the cards you own) and see
   how many copies you own and the Cardmarket prices.
@@ -175,7 +177,8 @@ rolled back without stopping the others.
 **Collection → Scan cards** opens a phone-friendly flow: pick an expansion (or *All expansions*) and a default
 condition, then frame one card at a time. **Auto-shoot** takes the photo by itself as soon as a card is in the box
 and in focus, and re-arms only once the box is empty again (the shutter button still works). The photo is
-recognised by a vision model on OpenRouter, matched against the local catalog and added to a draft.
+recognised on the server with the game's vision index ([cardledger_vision](https://github.com/gab-25/cardledger_vision):
+the card's image is compared with every printing's, no external service is called) and added to a draft.
 Uncertain cards ask you to pick among candidates; **Review** shows the draft (duplicates merged), lets you set a
 "list for sale above €X" threshold and saves everything at once (listed copies get the CardTrader market price; listings
 are created as *To publish*).
@@ -192,11 +195,9 @@ are created as *To publish*).
 - The Docker image builds the UI from the `ui` submodule (a Node stage in the `Dockerfile`), so the submodule must be
   checked out before `docker build`. To ship a new version of the interface, move the submodule to its release tag
   and commit it: `git -C ui fetch --tags && git -C ui checkout vX.Y.Z && git add ui`.
-- OpenRouter is configured only on the server, through `OPENROUTER_API_KEY` (it cannot be set from the profile);
-  `OPENROUTER_MODEL` picks the vision model (e.g. `qwen/qwen3.8-flash`) and has no default: card recognition
-  needs both.
-- The catalog is loaded and refreshed by the nightly sync (`uv run python manage.py sync_catalog`); run it once after
-  the first migrate.
+- The catalog and the vision indexes are loaded and refreshed by the nightly sync
+  (`uv run python manage.py sync_catalog`); run it once after the first migrate. A game without a vision index
+  can't be scanned with the camera (the API says so), but cards can still be searched and added by hand.
 - The camera works on **smartphones only** (webcams can't focus on a card up close). A session started on a
   computer shows a **QR code** that opens the same session on the phone; Review, confirmation and search work on
   both.
@@ -218,8 +219,8 @@ real certificate that only your own devices can reach; cardledger_ui's `npm run 
    ```
    With `DJANGO_BEHIND_HTTPS_PROXY` Django trusts `X-Forwarded-Proto` from Tailscale; plain `localhost` requests
    carry no such header and stay HTTP.
-3. Start the database (`docker compose up -d db`) and Django (`uv run python manage.py runserver`), with
-   `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` set for card recognition.
+3. Start the database (`docker compose up -d db`) and Django (`uv run python manage.py runserver`), after a
+   `sync_catalog` that stored the vision index of the game you scan.
 4. In cardledger_ui run `npm run dev:phone`: it checks Tailscale and that Django accepts the tailnet name, then
    publishes the Vite dev server (the UI with live reload, `/api/`, `/admin/` and `/static/` forwarded to Django) with
    `tailscale serve` and prints the `https://<pc>.<tailnet>.ts.net` address. Ctrl+C removes the Tailscale rule.

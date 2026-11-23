@@ -3,8 +3,6 @@
 Authentication is the Django session; CSRF comes from the csrftoken cookie, sent back as X-CSRFToken.
 """
 
-import logging
-
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from drf_spectacular.types import OpenApiTypes
@@ -14,29 +12,17 @@ from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
-from .. import catalog, recognition, scan, services
+from .. import catalog, recognition, scan, vision
 from ..models import Blueprint, Condition, Expansion, Language, ScanLine, ScanSession
-from ..openrouter import OpenRouterError
 from . import pages
 from . import serializers as s
 from .common import GAME, game_param, msg
 from .common import query as query_param
-from .errors import Blocked, Closed, ServiceError, ServiceMissing
+from .errors import Blocked, Closed, ServiceMissing
 
 SEARCH_LIMIT = 20
 SESSION_LIST_LIMIT = 10
 TAGS = ["scan"]
-logger = logging.getLogger(__name__)
-
-
-def _openrouter_configured():
-    """OpenRouter is a server setting: when it is missing, say so in the server console, not to the user."""
-    missing = [name for name, value in (("OPENROUTER_API_KEY", services.openrouter_key()),
-                                        ("OPENROUTER_MODEL", services.openrouter_model())) if not value]
-    if missing:
-        logger.warning("OpenRouter is not configured: card recognition needs the %s environment variable%s.",
-                       " and ".join(missing), "s" if len(missing) > 1 else "")
-    return not missing
 
 
 def _missing_services(user, game):
@@ -177,12 +163,13 @@ def _capture_result(result, message, session, line=None, status_code=status.HTTP
 def captures(request, uid):
     session = _get_session(request.user, uid)
     data = _validated(s.CaptureSerializer, request.data)
-    if not _openrouter_configured():
-        raise ServiceMissing("Card recognition is not available right now — try again later")
     missing = _missing_services(request.user, session.game)
     if missing:
         message, link = missing[0]
         raise ServiceMissing(message, link)
+    index = vision.index_for(session.game)
+    if index is None:  # the nightly sync has not stored this game's vision index (yet)
+        raise ServiceMissing(f"Card recognition isn't available for {session.game.name} yet")
 
     capture_id = data["capture_id"]
     capture, created = scan.reserve_capture(session, capture_id) if capture_id else (None, True)
@@ -196,17 +183,11 @@ def captures(request, uid):
     else:
         image = data["frame"].read()
         try:
-            with services.make_openrouter() as model:
-                rec = model.recognize_card(image, session.game.slug)
-            if not rec.name and not rec.collector_number:  # an empty table, a hand, a blurred frame
+            found = recognition.match_photo(image, index, session.game, session.expansion)
+            if found.reason == "no_card":  # an empty table, a hand, a blurred frame
                 scan.release_capture(capture)
                 return _capture_result("no_card", "No card in the picture — frame a card", session)
-            found = recognition.match(rec, session.expansion, session.game)
             done, _ = scan.add_capture(session, found, frame=image, capture=capture)
-        except OpenRouterError as exc:
-            scan.release_capture(capture)
-            reason = str(exc)[:160]
-            raise ServiceError(f"Couldn't recognise the card ({reason}) — take the photo again")
         except Exception:
             scan.release_capture(capture)
             raise

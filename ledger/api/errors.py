@@ -22,7 +22,7 @@ class Blocked(exceptions.APIException):
 
 
 class ServiceError(exceptions.APIException):
-    """An external service (OpenRouter, CardTrader) failed: the user can retry."""
+    """An external service (CardTrader) failed: the user can retry."""
 
     status_code = status.HTTP_502_BAD_GATEWAY
     default_detail = "An external service failed — try again."

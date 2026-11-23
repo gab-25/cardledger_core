@@ -2,12 +2,12 @@ from unittest import mock
 
 import httpx
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase, override_settings
+from django.test import Client, TestCase
 from django.urls import reverse
 
 from ledger import services
 from ledger.cardtrader import CardTraderClient
-from ledger.models import SyncLog, SyncService
+from ledger.models import SyncLog
 
 
 class ProfileTest(TestCase):
@@ -242,25 +242,3 @@ class CardTraderTokenTest(TestCase):
     def test_environment_token_is_not_used(self, _):
         with mock.patch.dict("os.environ", {"CARDTRADER_API_TOKEN": "env-token"}):
             self.assertFalse(self.account()["cardtrader"]["token_saved"])
-
-
-class OpenRouterNotInProfileTest(TestCase):
-    """OpenRouter is configured only through OPENROUTER_API_KEY, never from the profile."""
-
-    def setUp(self):
-        self.user = get_user_model().objects.create_user("gab", password="pw")
-        self.client.force_login(self.user)
-
-    def test_account_has_no_openrouter_section(self):
-        self.assertNotIn("openrouter", str(self.client.get(reverse("accounts:api_account")).json()).lower())
-
-    @override_settings(OPENROUTER_API_KEY="")
-    def test_openrouter_key_cannot_be_saved_from_profile(self):
-        self.client.put(reverse("accounts:api_profile"), {"openrouter_key": "sk-or-secret"},
-                        content_type="application/json")
-        self.assertEqual(services.openrouter_key(), "")
-        self.assertFalse(SyncService.objects.filter(name="OpenRouter").exists())
-
-    @override_settings(OPENROUTER_API_KEY="env-key")
-    def test_openrouter_key_comes_from_environment(self):
-        self.assertEqual(services.openrouter_key(), "env-key")
