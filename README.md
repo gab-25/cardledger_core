@@ -174,14 +174,13 @@ rolled back without stopping the others.
 
 ## Scanning cards with the camera
 
-**Collection → Scan cards** opens a phone-friendly flow: pick an expansion (or *All expansions*) and a default
-condition, then frame one card at a time. **Auto-shoot** takes the photo by itself as soon as a card is in the box
+**Collection → Scan cards** opens a phone-friendly flow: pick an expansion (or *All expansions*), a default
+condition and a default language, then frame one card at a time. **Auto-shoot** takes the photo by itself as soon as a card is in the box
 and in focus, and re-arms only once the box is empty again (the shutter button still works). The photo is
 recognised on the server with the game's vision index ([cardledger_vision](https://github.com/gab-25/cardledger_vision):
 the card's image is compared with every printing's, no external service is called) and added to a draft.
-Uncertain cards ask you to pick among candidates; **Review** shows the draft (duplicates merged), lets you set a
-"list for sale above €X" threshold and saves everything at once (listed copies get the CardTrader market price; listings
-are created as *To publish*).
+Uncertain cards ask you to pick among candidates; **Review** shows the draft (duplicates merged) and saves everything at once into the
+collection (the scan sets no prices and puts nothing on sale).
 
 - The scan screens are part of the React UI ([cardledger_ui](https://github.com/gab-25/cardledger_ui)), under
   `/scan/...`; they talk to the JSON API under `/api/scan/`. All the scan logic stays here.
