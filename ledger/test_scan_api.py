@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import tomllib
@@ -15,40 +16,29 @@ from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from . import catalog, services
+import cv2
+import numpy as np
+
+from . import catalog, recognition, services, vision
 from .api.scan import SESSION_LIST_LIMIT
 from .api.serializers import MAX_FRAME_BYTES
 from .forms import CatalogItemForm, ItemForm, ListingForm
 from .cardtrader import CardTraderError
-from .models import Blueprint, CollectionItem, Expansion, ScanCapture, ScanLine, ScanSession, SyncService
-from .openrouter import OpenRouterError
-from .recognition import Recognition
+from .models import (Blueprint, CollectionItem, Expansion, GameVisionIndex, ScanCapture, ScanLine, ScanSession,
+                     SyncService)
 from .tests import LedgerTestCase, cm_id, game, load_catalog
 from .test_game_api import pokemon_setup
+from .test_vision_utils import make_index, photo_of_card
 
 IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
 DESKTOP = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
 
 
-class FakeRecognizer:
-    def __init__(self):
-        self.result = Recognition(name="Counterspell", set_code="dmr", collector_number="045", language="IT")
-        self.error = None
-        self.calls = 0
-        self.games = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        pass
-
-    def recognize_card(self, image, game_slug="mtg"):
-        self.calls += 1
-        self.games.append(game_slug)
-        if self.error:
-            raise self.error
-        return self.result
+def blank_photo():
+    """A photo of an empty grey table: no card in it."""
+    ok, jpg = cv2.imencode(".jpg", np.full((600, 400, 3), 128, np.uint8))
+    assert ok
+    return jpg.tobytes()
 
 
 class ScanApiBase(LedgerTestCase):
@@ -56,34 +46,57 @@ class ScanApiBase(LedgerTestCase):
         super().setUp()
         load_catalog()
         self.dmr = Expansion.objects.get(code="dmr")
-        self.recognizer = FakeRecognizer()
-        patcher = mock.patch.object(services, "make_openrouter", mock.Mock(return_value=self.recognizer))
-        patcher.start()
+        self.counterspell = Blueprint.objects.get(cm_product_id=cm_id(1201))
+        # Magic's vision index: every single with its own synthetic art; self.photo is a photo of Counterspell.
+        vision._cache.clear()
+        singles = list(Blueprint.objects.filter(expansion__game=game(), category__is_single=True)
+                       .select_related("expansion").order_by("cm_product_id"))
+        self.arts = {bp.cm_product_id: photo_of_card(seed) for seed, bp in enumerate(singles, start=1)}
+        self.index_entries = [(bp, self.arts[bp.cm_product_id][0]) for bp in singles]
+        self.give_index(game(), self.index_entries)
+        self.photo = self.arts[self.counterspell.cm_product_id][1]
+        patcher = mock.patch.object(recognition, "match_photo", wraps=recognition.match_photo)
+        self.recognize = patcher.start()
         self.addCleanup(patcher.stop)
-        self.set_keys(openrouter="or-key", cardtrader="ct-token")
+        service = services.get_cardtrader(self.user)
+        service.api_token = "ct-token"
+        service.save()
         self.client.defaults["HTTP_USER_AGENT"] = IPHONE
 
-    def set_keys(self, *, openrouter, cardtrader, model="test/model"):
-        override = self.settings(OPENROUTER_API_KEY=openrouter, OPENROUTER_MODEL=model)
-        override.enable()
-        self.addCleanup(override.disable)
-        service = services.get_cardtrader(self.user)
-        service.api_token = cardtrader
-        service.save()
+    def give_index(self, the_game, entries):
+        """Store the vision index of the_game made of entries [(blueprint, card_png or None)]."""
+        data = make_index(the_game, entries)
+        GameVisionIndex.objects.update_or_create(
+            game=the_game, defaults={"data": data, "sha256": hashlib.sha256(data).hexdigest()})
+
+    def same_art(self, name="Counterspell", number="300"):
+        """A second DMR printing (name, number) drawn with Counterspell's art: a photo of Counterspell can't tell
+        them apart. Returns it."""
+        twin = Blueprint.objects.create(cm_product_id=cm_id(1299), expansion=self.dmr, name=name,
+                                        collector_number=number, category=self.counterspell.category)
+        self.give_index(game(), [*self.index_entries, (twin, self.arts[self.counterspell.cm_product_id][0])])
+        return twin
+
+    @property
+    def calls(self):
+        """How many photos were recognised."""
+        return self.recognize.call_count
 
     def call(self, method, name, *args, data=None, **extra):
         body = json.dumps(data) if data is not None else ""
         return getattr(self.client, method)(reverse(f"ledger:{name}", args=args), body,
                                             content_type="application/json", **extra)
 
-    def start(self, expansion_id=None, condition="NM"):
-        resp = self.call("post", "scan_api_sessions",
-                         data={"expansion_id": expansion_id or self.dmr.pk, "condition": condition})
+    def start(self, expansion_id=None, condition="NM", language=None):
+        data = {"expansion_id": expansion_id or self.dmr.pk, "condition": condition}
+        if language:
+            data["language"] = language
+        resp = self.call("post", "scan_api_sessions", data=data)
         self.assertEqual(resp.status_code, 201, resp.content)
         return ScanSession.objects.get(uuid=resp.json()["session"]["uuid"])
 
-    def capture(self, session, capture_id="c1"):
-        frame = SimpleUploadedFile("f.jpg", b"\xff\xd8jpeg", content_type="image/jpeg")
+    def capture(self, session, capture_id="c1", photo=None):
+        frame = SimpleUploadedFile("f.jpg", photo or self.photo, content_type="image/jpeg")
         return self.client.post(reverse("ledger:scan_api_captures", args=[session.uuid]),
                                 {"frame": frame, "capture_id": capture_id})
 
@@ -111,13 +124,47 @@ class SetupAndSessionTest(ScanApiBase):
         self.assertIn({"id": self.dmr.pk, "code": "dmr", "name": "Dominaria Remastered"}, body["expansions"])
         self.assertIn({"code": "NM", "label": "Near Mint"}, body["conditions"])
         self.assertIn({"code": "IT", "label": "Italian"}, body["languages"])
-        self.assertEqual(body["defaults"], {"expansion_id": None, "condition": "NM"})
+        self.assertEqual(body["defaults"], {"expansion_id": None, "condition": "NM", "language": "EN"})
         self.assertEqual((body["missing"], body["warnings"]), ([], []))
 
     def test_setup_defaults_follow_the_last_session(self):
         self.start(condition="EX")
         self.assertEqual(self.call("get", "scan_api_setup").json()["defaults"],
-                         {"expansion_id": self.dmr.pk, "condition": "EX"})
+                         {"expansion_id": self.dmr.pk, "condition": "EX", "language": "EN"})
+
+    def test_setup_defaults_to_last_session_language(self):
+        self.start(language="it")
+        self.assertEqual(self.call("get", "scan_api_setup").json()["defaults"]["language"], "IT")
+
+    def test_session_created_with_language(self):
+        session = self.start(language="IT")
+        self.assertEqual(session.default_language, "IT")
+        resp = self.call("get", "scan_api_session", session.uuid)
+        self.assertEqual(resp.json()["session"]["default_language"], "IT")
+
+    def test_language_defaults_to_en(self):
+        self.assertEqual(self.start().default_language, "EN")
+
+    def test_unknown_language_is_400(self):
+        self.assertInvalid(self.call("post", "scan_api_sessions", data={"language": "KL"}), "language")
+
+    def test_capture_line_uses_session_language_not_foil(self):
+        session = self.start(language="IT")
+        line = self.capture(session).json()["line"]
+        self.assertEqual((line["language"], line["foil"]), ("IT", False))
+
+    def test_unsure_capture_keeps_candidates_and_frame(self):
+        session = self.start()
+        body = self.uncertain_capture(session)
+        self.assertEqual(body["result"], "confirm")
+        line = ScanLine.objects.get(uuid=body["line"]["uuid"])
+        self.assertTrue(line.needs_confirmation)
+        self.assertTrue(line.candidates)
+        self.assertTrue(bytes(line.frame))
+
+    def uncertain_capture(self, session):
+        self.same_art()
+        return self.capture(session).json()
 
     def test_start_preloads_catalog(self):
         resp = self.call("post", "scan_api_sessions", data={"expansion_id": self.dmr.pk, "condition": "EX"})
@@ -155,7 +202,7 @@ class SetupAndSessionTest(ScanApiBase):
         line = body["last_line"]
         self.assertEqual(line["blueprint"]["id"], cm_id(1201))
         self.assertEqual(line["blueprint"]["expansion"]["code"], "dmr")
-        self.assertEqual((line["language"], line["condition"]), ("IT", "NM"))
+        self.assertEqual((line["language"], line["condition"]), ("EN", "NM"))
         for gone in ("price", "for_sale", "listed"):
             self.assertNotIn(gone, line)
 
@@ -266,6 +313,68 @@ class SessionDeleteTest(ScanApiBase):
 
 
 class CaptureTest(ScanApiBase):
+    def test_capture_recognizes_card(self):
+        session = self.start()
+        resp = self.capture(session)
+        body = resp.json()
+        self.assertEqual((resp.status_code, body["result"], body["message"]), (200, "added", "Added · 1 copy"))
+        self.assertEqual((body["line"]["blueprint"]["id"], body["line"]["needs_confirmation"]), (cm_id(1201), False))
+        line = ScanLine.objects.get(session=session)
+        self.assertEqual((line.blueprint, line.language, line.foil), (self.counterspell, "EN", False))
+        self.assertEqual(self.recognize.call_args.args[2:], (session.game, self.dmr))
+
+    def test_capture_unsure_asks_confirmation(self):
+        twin = self.same_art()
+        session = self.start(expansion_id=None)
+        session.expansion = None
+        session.save()
+        body = self.capture(session).json()
+        self.assertEqual((body["result"], body["message"]), ("confirm", "Which one is it?"))
+        line = ScanLine.objects.get(uuid=body["line"]["uuid"])
+        self.assertTrue(line.needs_confirmation)
+        self.assertIsNone(line.blueprint)
+        self.assertEqual(set(line.candidates), {cm_id(1201), twin.cm_product_id})
+        self.assertEqual(line.read_name, "Counterspell")
+        self.assertTrue(bytes(line.frame))
+
+    def test_capture_without_index_is_service_missing(self):
+        session = self.start()
+        GameVisionIndex.objects.all().delete()
+        body = self.assertError(self.capture(session, "noindex"), 503, "service_missing")
+        self.assertEqual(body["detail"], "Card recognition isn't available for Magic: The Gathering yet")
+        self.assertNotIn("help_url", body)
+        self.assertEqual((self.calls, ScanLine.objects.count()), (0, 0))
+        self.assertFalse(ScanCapture.objects.filter(capture_id="noindex").exists())
+        # manual search still works without an index
+        resp = self.call("post", "scan_api_manual", session.uuid,
+                         data={"blueprint_id": cm_id(1201), "language": "EN", "foil": False})
+        self.assertEqual(resp.json()["count"], 1)
+
+    def test_capture_without_card_is_no_card_and_retryable(self):
+        session = self.start()
+        body = self.capture(session, "retry", photo=blank_photo()).json()
+        self.assertEqual((body["result"], body["message"], body["line"]),
+                         ("no_card", "No card in the picture — frame a card", None))
+        self.assertFalse(ScanCapture.objects.filter(capture_id="retry").exists())
+        body = self.capture(session, "retry").json()
+        self.assertEqual((body["result"], body["count"]), ("added", 1))
+
+    def test_repeated_capture_id_adds_once(self):
+        session = self.start()
+        self.capture(session, "twice")
+        body = self.capture(session, "twice").json()
+        self.assertEqual((body["result"], body["count"]), ("added", 1))
+        self.assertEqual(ScanLine.objects.get(session=session).quantity, 1)
+        self.assertEqual(self.calls, 1)
+
+    def test_unexpected_error_releases_the_capture(self):
+        session = self.start()
+        with mock.patch.object(recognition, "match_photo", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.capture(session, "boom")
+        self.assertFalse(ScanCapture.objects.filter(capture_id="boom").exists())
+        self.assertEqual(self.capture(session, "boom").json()["result"], "added")
+
     def test_capture_adds_line(self):
         resp = self.capture(self.start())
         body = resp.json()
@@ -277,7 +386,7 @@ class CaptureTest(ScanApiBase):
         self.capture(session, "same")
         body = self.capture(session, "same").json()
         self.assertEqual((body["result"], body["count"]), ("added", 1))
-        self.assertEqual(self.recognizer.calls, 1)
+        self.assertEqual(self.calls, 1)
 
     def test_retry_after_merge_adds_once(self):
         session = self.start()
@@ -287,7 +396,7 @@ class CaptureTest(ScanApiBase):
         self.assertEqual(body["count"], 2)
         self.assertEqual(body["message"], "Added · 2 copies")
         self.assertEqual(ScanLine.objects.get(session=session).quantity, 2)
-        self.assertEqual(self.recognizer.calls, 2)
+        self.assertEqual(self.calls, 2)
 
     def test_capture_in_progress_is_busy(self):
         session = self.start()
@@ -296,7 +405,7 @@ class CaptureTest(ScanApiBase):
         self.assertEqual(resp.status_code, 202)
         self.assertEqual(resp.json()["result"], "busy")
         self.assertIn("Still recognising", resp.json()["message"])
-        self.assertEqual(self.recognizer.calls, 0)
+        self.assertEqual(self.calls, 0)
 
     def test_undone_capture_is_handled(self):
         session = self.start()
@@ -305,25 +414,9 @@ class CaptureTest(ScanApiBase):
         body = self.capture(session, "u").json()
         self.assertEqual((body["result"], body["line"], body["count"]), ("handled", None, 0))
 
-    def test_failed_capture_can_be_retried_with_same_id(self):
-        session = self.start()
-        self.recognizer.error = OpenRouterError("down")
-        self.assertError(self.capture(session, "x"), 502, "service_error")
-        self.recognizer.error = None
-        self.assertEqual(self.capture(session, "x").json()["message"], "Added · 1 copy")
-
-    def test_capture_error_shows_the_reason(self):
-        session = self.start()
-        self.recognizer.error = OpenRouterError("OpenRouter failed (429): rate limited")
-        body = self.assertError(self.capture(session), 502, "service_error")
-        self.assertIn("rate limited", body["detail"])
-        self.assertIn("take the photo again", body["detail"])
-        self.assertEqual(ScanLine.objects.count(), 0)
-
     def test_photo_without_a_card_adds_nothing(self):
         session = self.start()
-        self.recognizer.result = Recognition()
-        body = self.capture(session, "empty").json()
+        body = self.capture(session, "empty", photo=blank_photo()).json()
         self.assertEqual((body["result"], body["line"], body["count"]), ("no_card", None, 0))
         self.assertIn("No card in the picture", body["message"])
         self.assertEqual(ScanLine.objects.count(), 0)
@@ -339,7 +432,7 @@ class CaptureTest(ScanApiBase):
         frame = SimpleUploadedFile("f.jpg", b"\xff" * (MAX_FRAME_BYTES + 1), content_type="image/jpeg")
         resp = self.client.post(reverse("ledger:scan_api_captures", args=[session.uuid]), {"frame": frame})
         self.assertInvalid(resp, "frame")
-        self.assertEqual(self.recognizer.calls, 0)
+        self.assertEqual(self.calls, 0)
 
     def test_capture_needs_multipart(self):
         session = self.start()
@@ -350,31 +443,10 @@ class CaptureTest(ScanApiBase):
         session.status = ScanSession.Status.SAVED
         session.save()
         self.assertError(self.capture(session), 409, "closed")
-        self.assertEqual(self.recognizer.calls, 0)
+        self.assertEqual(self.calls, 0)
 
 
 class MissingServicesTest(ScanApiBase):
-    def test_capture_without_openrouter_key_logs_it_on_the_server(self):
-        session = self.start()
-        self.set_keys(openrouter="", cardtrader="ct-token")
-        with self.assertLogs("ledger.api.scan", "WARNING") as logs:
-            resp = self.capture(session)
-        self.assertIn("OPENROUTER_API_KEY", logs.output[0])
-        body = self.assertError(resp, 503, "service_missing")
-        self.assertEqual(body["detail"], "Card recognition is not available right now — try again later")
-        self.assertNotIn("help_url", body)
-        self.assertEqual((self.recognizer.calls, ScanLine.objects.count()), (0, 0))
-
-    def test_capture_without_openrouter_model_logs_it_on_the_server(self):
-        session = self.start()
-        self.set_keys(openrouter="or-key", cardtrader="ct-token", model="")
-        with self.assertLogs("ledger.api.scan", "WARNING") as logs:
-            resp = self.capture(session)
-        self.assertIn("OPENROUTER_MODEL", logs.output[0])
-        body = self.assertError(resp, 503, "service_missing")
-        self.assertEqual(body["detail"], "Card recognition is not available right now — try again later")
-        self.assertEqual((self.recognizer.calls, ScanLine.objects.count()), (0, 0))
-
     def test_scan_works_without_any_cardtrader_token(self):
         SyncService.objects.update(api_token="")
         self.client.force_login(self.other)  # no CardTrader token of their own either
@@ -389,27 +461,25 @@ class MissingServicesTest(ScanApiBase):
         body = self.assertError(self.capture(session), 503, "service_missing")
         self.assertIn("The card catalog is empty", body["detail"])
         self.assertNotIn("help_url", body)
-        self.assertEqual(self.recognizer.calls, 0)
+        self.assertEqual(self.calls, 0)
 
     def test_session_start_does_not_call_info(self):
         self.start()
         self.assertNotIn(("GET", "/info"), self.ct.calls)
 
     def test_setup_lists_missing_services(self):
-        self.set_keys(openrouter="", cardtrader="")
+        SyncService.objects.update(api_token="")
         Expansion.objects.all().delete()
-        with self.assertNoLogs("ledger.api.scan", "WARNING"):
-            body = self.call("get", "scan_api_setup").json()
+        body = self.call("get", "scan_api_setup").json()
         self.assertEqual(body["warnings"], [])
         self.assertEqual(len(body["missing"]), 1)
         self.assertIn("The card catalog is empty", body["missing"][0]["message"])
         self.assertEqual(body["missing"][0]["url"], "")
-        self.assertNotIn("OpenRouter", json.dumps(body))
 
 
 class ConfirmTest(ScanApiBase):
     def uncertain(self, session):
-        self.recognizer.result = Recognition(name="Counterspell", language="")
+        self.same_art()
         return self.capture(session).json()
 
     def test_uncertain_capture_then_confirm(self):
@@ -418,7 +488,7 @@ class ConfirmTest(ScanApiBase):
         self.assertEqual(body["result"], "confirm")
         line = body["line"]
         self.assertTrue(line["needs_confirmation"])
-        self.assertEqual([c["id"] for c in line["candidates"]], [cm_id(1201)])
+        self.assertEqual({c["id"] for c in line["candidates"]}, {cm_id(1201), cm_id(1299)})
         frame = self.client.get(line["frame_url"])
         self.assertEqual(frame["Content-Type"], "image/jpeg")
         resp = self.call("post", "scan_api_confirm", line["uuid"],
@@ -429,17 +499,16 @@ class ConfirmTest(ScanApiBase):
         self.assertIsNone(confirmed["frame_url"])
         self.assertEqual(resp.json()["count"], 1)
 
-    def test_candidates_say_which_match_the_name_read(self):
+    def test_candidates_say_which_match_the_best_candidate_name(self):
         session = self.start()
-        dmr = Expansion.objects.get(code="dmr")
-        Blueprint.objects.create(cm_product_id=cm_id(1299), expansion=dmr, name="Ponder", collector_number="45")
-        self.recognizer.result = Recognition(name="Lotus Petal", set_code="dmr", collector_number="045", language="EN")
+        self.same_art(name="Ponder", number="45")
         line = self.capture(session).json()["line"]
-        self.assertEqual(line["read_name"], "Lotus Petal")
-        self.assertEqual([(c["id"], c["matches_name"]) for c in line["candidates"]], [(cm_id(1201), False), (cm_id(1299), False)])
-        self.recognizer.result = Recognition(name="Counterspell", set_code="dmr", collector_number="45", language="")
-        line = self.capture(session, "c2").json()["line"]
-        self.assertEqual([(c["id"], c["matches_name"]) for c in line["candidates"]], [(cm_id(1201), True)])
+        # Two names with the same art: the name isn't certain, so the nearest other names are offered too.
+        self.assertLessEqual({cm_id(1201), cm_id(1299)}, {c["id"] for c in line["candidates"]})
+        self.assertEqual(line["read_name"], line["candidates"][0]["name"])
+        self.assertEqual([c["matches_name"] for c in line["candidates"]],
+                         [c["name"] == line["read_name"] for c in line["candidates"]])
+        self.assertEqual(sum(c["matches_name"] for c in line["candidates"]), 1)
 
     def test_confirm_needs_card_and_language(self):
         session = self.start()
@@ -620,6 +689,7 @@ class ScanGameTest(ScanApiBase):
     def setUp(self):
         super().setUp()
         self.sv1, self.pikachu, _ = pokemon_setup(self)
+        self.pikachu_card, self.pikachu_photo = photo_of_card(99)
 
     def start_in(self, slug, **data):
         resp = self.call("post", "scan_api_sessions", data={"game": slug, **data})
@@ -653,9 +723,9 @@ class ScanGameTest(ScanApiBase):
         self.start(condition="EX")
         self.start_in("pokemon", expansion_id=self.sv1.pk, condition="GD")
         self.assertEqual(self.call("get", "scan_api_setup").json()["defaults"],
-                         {"expansion_id": self.dmr.pk, "condition": "EX"})
+                         {"expansion_id": self.dmr.pk, "condition": "EX", "language": "EN"})
         self.assertEqual(self.client.get(reverse("ledger:scan_api_setup"), {"game": "pokemon"}).json()["defaults"],
-                         {"expansion_id": self.sv1.pk, "condition": "GD"})
+                         {"expansion_id": self.sv1.pk, "condition": "GD", "language": "EN"})
 
     def test_sessions_list_per_game(self):
         magic = self.start()
@@ -667,16 +737,21 @@ class ScanGameTest(ScanApiBase):
 
     def test_capture_matches_in_session_game(self):
         _, session = self.start_in("pokemon")
-        self.recognizer.result = Recognition(name="Pikachu", set_code="sv1", collector_number="025", language="EN")
-        resp = self.capture(session)
+        self.give_index(game("pokemon"), [(self.pikachu, self.pikachu_card)])
+        resp = self.capture(session, photo=self.pikachu_photo)
         self.assertEqual(resp.json()["result"], "added", resp.content)
         self.assertEqual(ScanLine.objects.get(session=session).blueprint.cm_product_id, 700001)
-        self.assertEqual(self.recognizer.games, ["pokemon"])
+        self.assertEqual(self.recognize.call_args.args[2], game("pokemon"))
+
+    def test_capture_without_the_games_index_is_service_missing(self):
+        _, session = self.start_in("pokemon")  # Magic has an index, Pokémon has none
+        body = self.assertError(self.capture(session, photo=self.pikachu_photo), 503, "service_missing")
+        self.assertEqual(body["detail"], "Card recognition isn't available for Pokémon yet")
 
     def test_capture_in_magic_session_ignores_other_games(self):
         _, session = self.start_in("mtg")
-        self.recognizer.result = Recognition(name="Pikachu", set_code="sv1", collector_number="025", language="EN")
-        self.assertEqual(self.capture(session).json()["result"], "confirm")
+        self.give_index(game("pokemon"), [(self.pikachu, self.pikachu_card)])
+        self.assertEqual(self.capture(session, photo=self.pikachu_photo).json()["result"], "confirm")
         self.assertNotIn(700001, ScanLine.objects.get(session=session).candidates)
 
     def test_manual_rejects_other_game(self):
@@ -688,8 +763,8 @@ class ScanGameTest(ScanApiBase):
 
     def test_confirm_stays_in_game(self):
         _, session = self.start_in("pokemon")
-        self.recognizer.result = Recognition(name="Pikachu", language="EN")
-        line = self.capture(session).json()["line"]
+        self.give_index(game("pokemon"), [(self.pikachu, self.pikachu_card)])
+        line = self.capture(session).json()["line"]  # a photo of Counterspell: nothing close in Pokémon's index
         self.assertInvalid(self.call("post", "scan_api_confirm", line["uuid"],
                                      data={"blueprint_id": cm_id(1201), "language": "EN"}), "blueprint_id")
         resp = self.call("post", "scan_api_confirm", line["uuid"], data={"blueprint_id": 700001, "language": "EN"})
@@ -709,6 +784,28 @@ class ScanGameTest(ScanApiBase):
         self.assertTrue(body["phone_url"].endswith(f"/pokemon/scan/{session.uuid}/"), body["phone_url"])
         self.call("post", "scan_api_manual", session.uuid, data={"blueprint_id": 700001, "language": "EN"})
         self.assertEqual(self.call("post", "scan_api_save", session.uuid).json()["redirect"], "/pokemon/")
+
+
+class CandidateMatchesNameTest(LedgerTestCase):
+    """The serializer compares read_name with the candidate's game: Magic suffixes are never stripped."""
+
+    def matches(self, bp, name):
+        from .api.serializers import CandidateSerializer
+        return CandidateSerializer(bp, context={"read_name": name}).data["matches_name"]
+
+    def test_magic_candidate_keeps_its_suffix(self):
+        load_catalog()
+        neo = Expansion.objects.get(code="neo")
+        bp = Blueprint.objects.create(cm_product_id=900010, expansion=neo, collector_number="T2",
+                                      name="Spirit Token (White 1/1)")
+        self.assertFalse(self.matches(bp, "Spirit Token"))
+        self.assertTrue(self.matches(bp, "Spirit Token (White 1/1)"))
+
+    def test_pokemon_candidate_matches_without_attacks(self):
+        pal = Expansion.objects.create(game=game("pokemon"), code="pal", name="Paldea Evolved")
+        bp = Blueprint.objects.create(cm_product_id=900011, expansion=pal, collector_number="21",
+                                      name="Arboliva [Enriching Oil | Solar Beam]")
+        self.assertTrue(self.matches(bp, "Arboliva"))
 
 
 class SchemaTest(LedgerTestCase):
@@ -777,7 +874,7 @@ class ScanIsolationTest(ScanApiBase):
 
     def test_other_users_session_and_lines_are_404(self):
         session = self.start()
-        self.recognizer.result = Recognition(name="Counterspell", language="")
+        self.same_art()
         line = ScanLine.objects.get(uuid=self.capture(session).json()["line"]["uuid"])
         self.client.force_login(self.other)
         frame = SimpleUploadedFile("f.jpg", b"\xff\xd8jpeg", content_type="image/jpeg")
@@ -804,7 +901,7 @@ class ScanIsolationTest(ScanApiBase):
             self.assertEqual(self.client.get(reverse("ledger:scan_api_frame", args=[line.uuid])).status_code, 404)
         line.refresh_from_db()
         self.assertEqual(line.quantity, 1)
-        self.assertEqual(self.recognizer.calls, 1)
+        self.assertEqual(self.calls, 1)
 
     def test_setup_defaults_come_from_own_last_session(self):
         self.start(condition="LP")

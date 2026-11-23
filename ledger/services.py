@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -22,7 +21,6 @@ from .cardtrader import (
     money,
 )
 from .ct_properties import foil_key, language_key, read_foil, read_language
-from .openrouter import OpenRouterClient
 from .catalog import blueprint_of, clashing_owners, merge_cards, normalize_number
 from .forms import get_or_create_card
 from .models import (
@@ -118,21 +116,6 @@ def remove_api_token(user):
     service.ct_user_id = None
     service.save(update_fields=["api_token", "ct_user_id"])
     _log(f"{CARDTRADER}: API token removed", SyncLog.Level.WARNING, owner=user)
-
-
-def openrouter_key():
-    """OpenRouter is configured by the server admin only, through OPENROUTER_API_KEY."""
-    return getattr(settings, "OPENROUTER_API_KEY", "")
-
-
-def openrouter_model():
-    """The vision model, set by the server admin only, through OPENROUTER_MODEL (no default)."""
-    return getattr(settings, "OPENROUTER_MODEL", "")
-
-
-def make_openrouter():
-    """Build the OpenRouter client. Tests patch this to inject a fake."""
-    return OpenRouterClient(openrouter_key(), model=openrouter_model())
 
 
 def _log(message, level=SyncLog.Level.OK, owner=None):

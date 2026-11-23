@@ -25,6 +25,11 @@ def catalog_key(slug):
     return f"catalog/v{FORMAT_VERSION}/{slug}.json"
 
 
+def vision_key(slug):
+    """Where a game's vision index is in the bucket (the generator uploads it next to the catalog)."""
+    return f"vision/v{FORMAT_VERSION}/{slug}.bin"
+
+
 @dataclass(frozen=True)
 class FileExpansion:
     code: str
@@ -103,7 +108,13 @@ class CatalogBucket:
 
     def fetch(self, slug):
         """The raw bytes of slug's file. Raises CatalogFileMissing when the bucket has none."""
-        key = catalog_key(slug)
+        return self._get(catalog_key(slug))
+
+    def fetch_vision(self, slug):
+        """The raw bytes of slug's vision index. Raises CatalogFileMissing when the bucket has none."""
+        return self._get(vision_key(slug))
+
+    def _get(self, key):
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=key)
             return response["Body"].read()

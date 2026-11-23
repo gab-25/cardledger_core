@@ -78,6 +78,18 @@ class Game(models.Model):
         return cls.objects.get(slug=slug)
 
 
+class GameVisionIndex(models.Model):
+    """A game's vision index file (cardledger_vision), apart from Game so that loading a game never loads it."""
+
+    game = models.OneToOneField(Game, on_delete=models.CASCADE, related_name="vision")
+    data = models.BinaryField(editable=False)
+    sha256 = models.CharField(max_length=64, help_text="sha256 of the file stored (the sync skips the same file)")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.game} vision index"
+
+
 class Card(models.Model):
     """A specific printing of a card (name + set)."""
 
@@ -445,6 +457,7 @@ class ScanSession(models.Model):
     game = models.ForeignKey(Game, on_delete=models.PROTECT, related_name="scan_sessions")
     expansion = models.ForeignKey(Expansion, null=True, blank=True, on_delete=models.SET_NULL)
     default_condition = models.CharField(max_length=2, choices=Condition.choices, default=Condition.NEAR_MINT)
+    default_language = models.CharField(max_length=3, choices=Language.choices, default=Language.EN)
     status = models.CharField(max_length=5, choices=Status.choices, default=Status.OPEN)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

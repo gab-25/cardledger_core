@@ -12,6 +12,15 @@ class CatalogTest(LedgerTestCase):
         self.assertEqual(catalog.expansion_by_code("NEO", game()).name, "Kamigawa: Neon Dynasty")
         self.assertIsNone(catalog.expansion_by_code("zzz", game()))
 
+    def test_slug_expansion_code(self):
+        yugioh = game("yugioh")
+        agov = Expansion.objects.create(game=yugioh, code="agov-age-of-overlord", name="Age of Overlord")
+        self.assertEqual(catalog.expansion_by_code("AGOV", yugioh), agov)
+        Expansion.objects.create(game=yugioh, code="agov-other", name="Other")
+        self.assertIsNone(catalog.expansion_by_code("agov", yugioh))
+        exact = Expansion.objects.create(game=yugioh, code="agov", name="Exact")
+        self.assertEqual(catalog.expansion_by_code("agov", yugioh), exact)
+
     def test_blueprint_without_category_is_a_card(self):
         self.assertFalse(Blueprint(name="x").is_product)
 

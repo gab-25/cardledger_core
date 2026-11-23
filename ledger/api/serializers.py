@@ -64,10 +64,11 @@ class BlueprintSerializer(serializers.ModelSerializer):
 
 
 class CandidateSerializer(BlueprintSerializer):
-    """A printing to choose from; context["read_name"] is the name the model read on the card."""
+    """A printing to choose from; context["read_name"] is the line's read_name (the best visual candidate's name)."""
 
     matches_name = serializers.SerializerMethodField(
-        help_text="It carries the name read on the card: only such a candidate should be pre-selected")
+        help_text="It carries read_name, the name of the best visual candidate: only such a candidate should be "
+                  "pre-selected")
 
     class Meta(BlueprintSerializer.Meta):
         fields = [*BlueprintSerializer.Meta.fields, "matches_name"]
@@ -82,13 +83,16 @@ class LineSerializer(serializers.ModelSerializer):
     blueprint = BlueprintSerializer(allow_null=True, read_only=True)
     frame_url = serializers.SerializerMethodField(help_text="The photo, kept while the card needs confirmation")
     candidates = serializers.SerializerMethodField(
-        help_text="The cards to choose from when it needs confirmation, those matching read_name first")
+        help_text="The cards to choose from when it needs confirmation, ordered by visual similarity to the photo "
+                  "(not by name)")
 
     class Meta:
         model = ScanLine
         fields = ["uuid", "blueprint", "language", "foil", "condition", "quantity",
                   "needs_confirmation", "read_name", "frame_url", "candidates"]
         read_only_fields = fields
+        extra_kwargs = {"read_name": {"help_text": "The name of the best visual candidate (nothing is read from the "
+                                                   "card), empty without candidates"}}
 
     @extend_schema_field(serializers.CharField(allow_null=True))
     def get_frame_url(self, line):
@@ -117,7 +121,7 @@ class SessionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ScanSession
-        fields = ["uuid", "status", "game", "expansion", "default_condition", "count", "last_line",
+        fields = ["uuid", "status", "game", "expansion", "default_condition", "default_language", "count", "last_line",
                   "is_phone", "phone_url", "phone_secure"]
         read_only_fields = fields
 
@@ -152,6 +156,7 @@ class ChoiceSerializer(serializers.Serializer):
 class SetupDefaultsSerializer(serializers.Serializer):
     expansion_id = serializers.IntegerField(allow_null=True)
     condition = serializers.CharField()
+    language = serializers.CharField()
 
 
 class MissingServiceSerializer(serializers.Serializer):
@@ -245,6 +250,7 @@ class SessionCreateSerializer(serializers.Serializer):
     )
     condition = serializers.ChoiceField(Condition.choices, default=Condition.NEAR_MINT,
                                         help_text="The default condition of the scanned cards")
+    language = LanguageField(default=Language.EN, help_text="The default language of the scanned cards")
 
     def validate(self, attrs):
         attrs["game"] = attrs["game"] or Game.by_slug(MAGIC)

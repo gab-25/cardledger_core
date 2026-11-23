@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from . import scan
 from .models import Blueprint, Card, CollectionItem, Expansion, Listing, ScanLine, SyncLog
-from .recognition import Match, Recognition
+from .recognition import Match
 from .tests import LedgerTestCase, cm_id, load_catalog, game
 
 
@@ -12,18 +12,17 @@ class ScanTestCase(LedgerTestCase):
         load_catalog()
         self.dmr = Expansion.objects.get(code="dmr")
         self.bolt = Blueprint.objects.get(cm_product_id=cm_id(1201))  # Counterspell DMR #45
-        self.session = scan.start_session(self.user, game("mtg"), self.dmr, "NM")
+        self.session = scan.start_session(self.user, game("mtg"), self.dmr, "NM", "IT")
 
-    def capture(self, capture_id, *, language="IT", foil=False, certain=True):
-        rec = Recognition(name="Counterspell", language=language, foil=foil)
+    def capture(self, capture_id, *, certain=True):
         m = Match(self.bolt, [self.bolt], "ok") if certain else Match(None, [self.bolt], "ambiguous")
-        return scan.add_capture(self.session, rec, m, frame=b"jpeg", capture_id=capture_id)
+        return scan.add_capture(self.session, m, frame=b"jpeg", capture_id=capture_id)
 
 
 class SessionGameTest(ScanTestCase):
     def test_session_has_its_game(self):
         self.assertEqual(self.session.game.slug, "mtg")
-        pokemon = scan.start_session(self.user, game("pokemon"), None, "NM")
+        pokemon = scan.start_session(self.user, game("pokemon"), None, "NM", "EN")
         self.assertEqual(pokemon.game.slug, "pokemon")
         self.assertEqual(list(scan.open_sessions(self.user, game("pokemon"))), [pokemon])
         self.assertEqual(set(scan.open_sessions(self.user)), {self.session, pokemon})
@@ -42,15 +41,22 @@ class CaptureTest(ScanTestCase):
         self.assertTrue(merged)
         self.assertEqual((self.session.lines.count(), line.quantity), (1, 2))
 
+    def test_capture_line_uses_session_language_not_foil(self):
+        line, _ = self.capture("a")
+        self.assertEqual((line.language, line.foil), ("IT", False))
+
     def test_different_language_is_a_new_line(self):
         self.capture("a")
-        self.capture("b", language="EN")
-        self.assertEqual(self.session.lines.count(), 2)
+        english = scan.start_session(self.user, game("mtg"), self.dmr, "NM", "EN")
+        line, _ = scan.add_capture(english, Match(self.bolt, [self.bolt], "ok"), frame=b"jpeg", capture_id="b")
+        self.assertEqual(line.language, "EN")
+        self.assertEqual(self.session.lines.count(), 1)
 
     def test_uncertain_capture_kept_with_frame(self):
         line, _ = self.capture("a", certain=False)
         self.assertTrue(line.needs_confirmation)
         self.assertEqual((bytes(line.frame), line.candidates, line.blueprint), (b"jpeg", [cm_id(1201)], None))
+        self.assertEqual((line.language, line.foil, line.read_name), ("IT", False, "Counterspell"))
 
     def test_undo_and_confirm(self):
         line, _ = self.capture("a")
@@ -68,7 +74,7 @@ class CaptureTest(ScanTestCase):
 
     def test_update_line_remerges(self):
         a, _ = self.capture("a")
-        b, _ = self.capture("b", foil=True)
+        b = scan.add_manual(self.session, self.bolt, "IT", True)
         merged = scan.update_line(b, foil=False)
         self.assertEqual((merged.pk, merged.quantity), (a.pk, 2))
         self.assertFalse(ScanLine.objects.filter(pk=b.pk).exists())
@@ -108,9 +114,8 @@ class SaveTest(ScanTestCase):
 
     def test_save_adds_to_own_item_for_same_printing(self):
         mine = self.printing(quantity=2)
-        friend_session = scan.start_session(self.other, game("mtg"), self.dmr, "NM")
-        rec = Recognition(name="Counterspell", language="IT")
-        scan.add_capture(friend_session, rec, Match(self.bolt, [self.bolt], "ok"), frame=b"jpeg", capture_id="f")
+        friend_session = scan.start_session(self.other, game("mtg"), self.dmr, "NM", "IT")
+        scan.add_capture(friend_session, Match(self.bolt, [self.bolt], "ok"), frame=b"jpeg", capture_id="f")
         scan.save_session(friend_session)
         theirs = CollectionItem.objects.get(owner=self.other)
         self.assertEqual((theirs.card_id, theirs.quantity), (mine.card_id, 1))

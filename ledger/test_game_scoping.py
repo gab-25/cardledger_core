@@ -9,7 +9,6 @@ from django.urls import reverse
 from . import catalog, services
 from .cardmarket import owned_quantities
 from .models import MAGIC, Blueprint, Card, CardmarketPrice, Category, CollectionItem, Expansion
-from .recognition import Recognition, match
 from .search import search_blueprints
 from .tests import LedgerTestCase, cm_id, game, load_catalog
 
@@ -123,11 +122,7 @@ class GameScopingTest(LedgerTestCase):
         magic = Blueprint.objects.filter(expansion__game=self.magic)
         self.assertEqual([b.cm_product_id for b in search_blueprints(magic, "mh2 138")], [RAGAVAN])
 
-    def test_recognition_searches_only_magic(self):
-        m = match(Recognition(name="Pikachu", language="EN"), None, self.magic)
-        self.assertEqual((m.reason, m.candidates), ("not_found", []))
-        m = match(Recognition(name="Pikachu", set_code="mh2", collector_number="138", language="EN"), None, self.magic)
-        self.assertNotIn(PIKACHU, [b.cm_product_id for b in m.candidates])
+    def test_expansion_codes_stay_in_their_game(self):
         self.assertEqual(catalog.expansion_by_code("mh2", self.pokemon), self.pikachu.expansion)
         self.assertEqual(catalog.expansion_by_code("MH2", self.magic).game, self.magic)
 
