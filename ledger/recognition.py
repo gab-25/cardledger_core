@@ -3,6 +3,7 @@
 import re
 from dataclasses import dataclass, field
 
+from cardledger_vision import recognize
 from django.db.models import Q
 
 from . import catalog
@@ -127,3 +128,24 @@ def match(rec, expansion, game):
     if not rec.language:
         return Match(None, [certain], "language")
     return Match(certain, [certain], "ok")
+
+
+def match_photo(photo, index, game, expansion):
+    """The printing of `game` that the photo shows, by its vision index; expansion: the session's locked one, or
+    None. Ids the catalog no longer has are dropped; a certain id that is gone leaves its candidates to confirm.
+    reason: ok | ambiguous | not_found | no_card."""
+    result = recognize(photo, index, lock=expansion.code if expansion is not None else None)
+    if result.outcome == "no_card":
+        return Match(None, [], "no_card")
+    found = {
+        b.cm_product_id: b
+        for b in Blueprint.objects.filter(expansion__game=game, cm_product_id__in=result.candidates)
+        .select_related("expansion")
+    }
+    candidates = [found[i] for i in result.candidates if i in found]
+    if result.outcome == "ok" and result.product_id in found:
+        return Match(found[result.product_id], candidates, "ok")
+    if result.outcome == "not_found" and not candidates:
+        return Match(None, [], "not_found")
+    # A certain id the catalog lost, or an ambiguous answer: the owner picks among what is left.
+    return Match(None, candidates, "ambiguous" if candidates else "not_found")
