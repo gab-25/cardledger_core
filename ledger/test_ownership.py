@@ -200,7 +200,7 @@ class OwnerIsolationSweepTest(LedgerTestCase):
         names = list(CollectionItem.objects.owned_by(self.user).values_list("card__name", flat=True))
         for name, params in (("api_collection", {}), ("api_listings", {}), ("api_catalog", {"owned": "1"}),
                              ("api_sync", {}), ("api_orders", {}), ("api_shipments", {}),
-                             ("api_reports", {}), ("api_purchases", {}), ("api_overview", {"game": "all"})):
+                             ("api_reports", {}), ("api_purchases", {}), ("api_overview", {})):
             resp = self.client.get(reverse(f"ledger:{name}"), params)
             with self.subTest(page=name):
                 self.assertEqual(resp.status_code, 200)

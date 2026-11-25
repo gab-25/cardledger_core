@@ -116,8 +116,8 @@ There is no linter or formatter configured. Settings come only from the environm
   the game (`set_location`, `delete`, `list`/`reprice` through `services.list_at_trend` on `markets`, default `["ct"]`,
   priced by `price_over_trend`). `GET /api/listings/` has `?market=`, rows per (item, market) and `by_market` stats;
   `listings/<item>/` reads all of an item's listings and PUTs/DELETEs one by `market` (default ct);
-  `POST /api/listings/bulk/` pauses/resumes/deletes the listings of item ids (optionally of one market). `GET /api/overview/` (`ledger/api/overview.py`) is the dashboard: revenue and profit from the
-  global orders, stock value per game, the game's price movers. The user's `accounts.SellerSettings` (created on
+  `POST /api/listings/bulk/` pauses/resumes/deletes the listings of item ids (optionally of one market). `GET /api/overview/` (`ledger/api/overview.py`) is the dashboard of one game (never all): revenue and profit of
+  the orders with a line of the game (for its share, as in the reports), stock value by set, the game's price movers. The user's `accounts.SellerSettings` (created on
   demand, `seller_settings_of`) feed it: `price_rounding` ("" = 0.05, else 0.05/0.10/0.50/1.00) is the bulk price
   step, `hold_below_cost` skips items whose new price would be under their cost (the repricing rules raise to it instead; both use price_rounding), `default_condition` is the add
   form's default, `reprice_before_sync` see Repricing (`auto_import_orders`/`push_prices` are stored only). Catalog rows add `rarity`, `year` (expansion
@@ -232,10 +232,10 @@ There is no linter or formatter configured. Settings come only from the environm
 - **Locations** (`ledger/api/locations.py`, `/api/locations/`): `Location(user, code unique per user, capacity, note)`;
   used = copies of items with that location (every game), free = capacity − used (may be negative); codes used only
   on items are listed with `id: null`; renaming a code moves the items; `suggest/?copies=` = most free slots ≥ copies.
-- **Overview extras**: `?game=all`, `?market=`, `?period=7d|30d|qtd|ytd` (rules in the `ledger/api/overview.py`
-  docstring: orders stay global, `*_30d` follow the period, sell-through = sold / (stock now + sold), weeks split
+- **Overview extras**: `?game=` (one game, default mtg; `all` is refused), `?market=`, `?period=7d|30d|qtd|ytd` (rules
+  in the `ledger/api/overview.py` docstring: an order counts for the share of its lines of the game, `*_30d` follow the period, sell-through = sold / (stock now + sold), weeks split
   singles/sealed by the line's card, alerts orders_to_pack/below_trend/not_listed/stale/locations_full with tone
-  danger|warn|info and SPA hrefs).
+  danger|warn|info and SPA hrefs under the game; orders to pack and full locations are of every game).
 - **Background work**: Celery with Redis, no beat; no tasks are defined: `sync_catalog` runs the sync in-process and is scheduled
   externally, like `snapshot_stock_values` (daily).
 

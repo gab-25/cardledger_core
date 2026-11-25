@@ -237,9 +237,15 @@ class OverviewTest(DealerTestCase):
         self.assertEqual(resp.status_code, 200)
         return resp.json()
 
-    def order(self, ct_id, days_ago, total, state="paid"):
-        return Order.objects.create(owner=self.other, ct_id=ct_id, code=f"o{ct_id}", state=state, total=total,
-                                    paid_at=timezone.now() - timedelta(days=days_ago))
+    def order(self, ct_id, days_ago, total, state="paid", item=None):
+        """An order of `total`; with `item`, one line of it for the whole total (the order counts for its game)."""
+        order = Order.objects.create(owner=self.other, ct_id=ct_id, code=f"o{ct_id}", state=state, total=total,
+                                     paid_at=timezone.now() - timedelta(days=days_ago))
+        if item is not None:
+            listing, _ = Listing.objects.get_or_create(item=item, defaults={"price": total, "quantity": 1})
+            OrderItem.objects.create(order=order, market_item_id=f"l{ct_id}", listing=listing, name=item.card.name,
+                                     price=total, quantity=1)
+        return order
 
     def test_empty(self):
         data = self.overview()
@@ -247,13 +253,15 @@ class OverviewTest(DealerTestCase):
         self.assertEqual({w["total"] for w in data["revenue_weeks"]}, {"0.00"})
         self.assertEqual((data["revenue_30d"], data["revenue_prev_30d"], data["orders_30d"], data["avg_basket_30d"],
                           data["gross_profit_30d"], data["movers"]), (None, None, 0, None, None, []))
-        self.assertIn({"game": "mtg", "name": "Magic: The Gathering", "value": "0.00"}, data["stock_by_game"])
+        self.assertEqual(data["stock_by_set"], [])
 
     def test_revenue(self):
-        self.order(1, 0, Decimal("20.00"))
-        self.order(2, 3, Decimal("10.00"))
-        self.order(3, 40, Decimal("7.50"))
-        self.order(4, 1, Decimal("99.00"), state="canceled")
+        mtg = self.item(SHEOLDRED, quantity=5)
+        self.order(1, 0, Decimal("20.00"), item=mtg)
+        self.order(2, 3, Decimal("10.00"), item=mtg)
+        self.order(3, 40, Decimal("7.50"), item=mtg)
+        self.order(4, 1, Decimal("99.00"), state="canceled", item=mtg)
+        self.order(5, 1, Decimal("50.00"))  # no line of the game: not counted
         data = self.overview()
         self.assertEqual((data["revenue_30d"], data["revenue_prev_30d"], data["orders_30d"], data["avg_basket_30d"]),
                          ("30.00", "7.50", 2, "15.00"))
@@ -263,6 +271,16 @@ class OverviewTest(DealerTestCase):
         self.assertEqual(weeks[-1]["week_start"], monday.isoformat())
         self.assertEqual(weeks[0]["week_start"], (monday - timedelta(weeks=11)).isoformat())
         self.assertEqual(sum(Decimal(w["total"]) for w in weeks), Decimal("37.50"))
+        pokemon = self.overview(game="pokemon")
+        self.assertEqual((pokemon["revenue_30d"], pokemon["orders_30d"]), (None, 0))
+
+    def test_an_order_counts_for_the_share_of_its_game_lines(self):
+        order = self.order(1, 1, Decimal("33.00"), item=self.item(SHEOLDRED))  # one line 33.00
+        order.items.update(price=Decimal("20.00"))
+        OrderItem.objects.create(order=order, market_item_id="x", name="Unknown card", price=Decimal("10.00"))
+        data = self.overview()  # 33.00 × 20 / 30
+        self.assertEqual((data["revenue"], data["orders"], data["avg_basket"]), ("22.00", 1, "22.00"))
+        self.assertEqual(sum(Decimal(w["total"]) for w in data["revenue_weeks"]), Decimal("22.00"))
 
     def test_gross_profit(self):
         sheoldred = self.item(SHEOLDRED, cost=Decimal("12.00"))
@@ -276,12 +294,16 @@ class OverviewTest(DealerTestCase):
         OrderItem.objects.create(order=old, market_item_id=9, listing=sheoldred.listing_for(), name="x", price=Decimal("20.00"))
         self.assertEqual(self.overview()["gross_profit_30d"], "16.00")
 
-    def test_stock_by_game(self):
+    def test_stock_by_set(self):
         self.guide(SHEOLDRED, trend=Decimal("10.00"))
+        self.guide(COUNTERSPELL, trend=Decimal("2.00"))
         self.item(SHEOLDRED, quantity=3)
-        stock = {g["game"]: g["value"] for g in self.overview()["stock_by_game"]}
-        self.assertEqual((stock["mtg"], stock["pokemon"]), ("30.00", "0.00"))
-        self.assertEqual(len(stock), 6)
+        self.item(COUNTERSPELL, quantity=1)
+        stock = self.overview()["stock_by_set"]
+        self.assertEqual([(s["code"], s["value"]) for s in stock][0], ("DMU", "30.00"))
+        self.assertEqual(len(stock), 2)
+        self.assertTrue(all(s["name"] for s in stock))
+        self.assertEqual(self.overview(game="pokemon")["stock_by_set"], [])
 
     def test_movers(self):
         self.guide(SHEOLDRED, trend=Decimal("11.00"), avg7=Decimal("12.00"), avg30=Decimal("10.00"),
@@ -306,12 +328,14 @@ class OverviewTest(DealerTestCase):
         before = self.overview()
         self.client.force_login(self.other)
         data = self.overview()
-        self.assertIsNotNone(before["revenue_30d"])  # the admin's demo orders
+        self.assertTrue(CollectionItem.objects.owned_by(self.user).exists())  # the admin's demo collection
+        self.assertEqual(before["period"], "30d")
         self.assertEqual((data["revenue_30d"], data["orders_30d"]), (None, 0))
-        self.assertEqual({g["value"] for g in data["stock_by_game"]}, {"0.00"})
+        self.assertEqual(data["stock_by_set"], [])
 
-    def test_unknown_game_is_400(self):
-        self.assertEqual(self.client.get(reverse("ledger:api_overview"), {"game": "chess"}).status_code, 400)
+    def test_unknown_game_and_all_are_400(self):
+        for game in ("chess", "all"):  # one game at a time, never all of them
+            self.assertEqual(self.client.get(reverse("ledger:api_overview"), {"game": game}).status_code, 400)
 
 
 class PackingOrderTest(LedgerTestCase):

@@ -112,9 +112,10 @@ class OverviewExtrasTest(DealerTestCase):
         return order
 
     def test_period_and_market(self):
-        self.order(1, 2, "10.00", market="cm")
-        self.order(2, 10, "20.00")
-        self.order(3, 20, "40.00")
+        mtg = self.item(SHEOLDRED, quantity=3)
+        self.order(1, 2, "10.00", market="cm", lines=[(mtg, "10.00", 1)])
+        self.order(2, 10, "20.00", lines=[(mtg, "20.00", 1)])
+        self.order(3, 20, "40.00", lines=[(mtg, "40.00", 1)])
         week = self.overview(period="7d")
         self.assertEqual((week["period"], week["revenue"], week["revenue_30d"], week["orders"], week["revenue_prev"]),
                          ("7d", "10.00", "10.00", 1, "20.00"))
@@ -141,10 +142,10 @@ class OverviewExtrasTest(DealerTestCase):
         self.assertEqual(data["sell_through_prev"], "0.0")
         self.assertEqual(self.overview(game="pokemon")["sell_through"], None)
 
-    def test_game_all(self):
+    def test_movers_are_of_the_game(self):
         self.guide(SHEOLDRED, trend=Decimal("11.00"), avg7=Decimal("12.00"), avg30=Decimal("10.00"))
         self.item(SHEOLDRED)
-        self.assertEqual(len(self.overview(game="all")["movers"]), 1)
+        self.assertEqual(len(self.overview()["movers"]), 1)
         self.assertEqual(len(self.overview(game="pokemon")["movers"]), 0)
 
     def test_alerts(self):
@@ -162,7 +163,7 @@ class OverviewExtrasTest(DealerTestCase):
         alerts = {a["kind"]: a for a in self.overview()["alerts"]}
         self.assertEqual(list(alerts), ["orders_to_pack", "below_trend", "not_listed", "stale", "locations_full"])
         self.assertEqual((alerts["orders_to_pack"]["title"], alerts["orders_to_pack"]["tone"],
-                          alerts["orders_to_pack"]["href"]), ("1 order to pack", "danger", "/orders?tab=to_pack"))
+                          alerts["orders_to_pack"]["href"]), ("1 order to pack", "danger", "/mtg/orders?tab=to_pack"))
         self.assertTrue(alerts["orders_to_pack"]["sub"].startswith("1 overdue · 0 due today · oldest 10 days"))
         self.assertEqual((alerts["below_trend"]["title"], alerts["below_trend"]["sub"], alerts["below_trend"]["href"]),
                          ("1 listing below trend", "avg −20.0% · €4.00 under trend", "/mtg/?view=below_trend"))
@@ -173,7 +174,8 @@ class OverviewExtrasTest(DealerTestCase):
         self.assertEqual((alerts["locations_full"]["sub"], alerts["locations_full"]["href"]),
                          ("A1 5/5", "/mtg/?location=A1"))
         self.assertEqual(self.overview(market="cm")["alerts"][0]["kind"], "below_trend")
-        self.assertEqual([a["kind"] for a in self.overview(game="pokemon")["alerts"]],
-                         ["orders_to_pack", "locations_full"])
-        self.assertEqual({a["href"] for a in self.overview(game="all")["alerts"] if a["kind"] == "stale"},
-                         {"/mtg/?view=stale"})
+        # packing and storage are shared: the same in every game, under its URL
+        pokemon = {a["kind"]: a for a in self.overview(game="pokemon")["alerts"]}
+        self.assertEqual(list(pokemon), ["orders_to_pack", "locations_full"])
+        self.assertEqual((pokemon["orders_to_pack"]["href"], pokemon["locations_full"]["href"]),
+                         ("/pokemon/orders?tab=to_pack", "/pokemon/?location=A1"))

@@ -1,25 +1,28 @@
-"""The overview API (/api/overview/): the dealer's dashboard, revenue, profit, sell-through, stock value per game, price
-movers and alerts.
+"""The overview API (/api/overview/): the dashboard of one game (?game, default Magic; never all of them): revenue,
+profit, sell-through, stock value by set, price movers and alerts.
 
-- Orders are global (market orders are not per game): revenue, orders, basket and gross profit cover every game, of
-  ?market when given, over ?period: 7d / 30d (rolling, the previous 7 / 30 days before), qtd / ytd (since the start of
-  the quarter / year, local dates; the previous period is the same span from the start of the previous quarter /
-  year). The *_30d names are kept for compatibility and follow the period too.
-- revenue_weeks: the last 12 Monday-start weeks (whatever the period) with the orders' total, singles and sealed (the
-  lines' price × quantity by their card's kind; a line not linked to a collection item counts as a single).
+- Orders are not per game, so as in the reports an order counts for ?game when one of its lines is of that game (line
+  → listing → item → card's game), for the share of its value in those lines (price × quantity; evenly when no line
+  has a price); lines not linked to a collection item belong to no game. Revenue (Σ total × share), orders (those
+  counted), basket (revenue / orders) and gross profit (the game's lines with a cost) are of ?market when given, over
+  ?period: 7d / 30d (rolling, the previous 7 / 30 days before), qtd / ytd (since the start of the quarter / year,
+  local dates; the previous period is the same span from the start of the previous quarter / year). The *_30d names
+  are kept for compatibility and follow the period too.
+- revenue_weeks: the last 12 Monday-start weeks (whatever the period) with the game's share of the orders' total, and
+  its lines' price × quantity split into singles and sealed by the card's kind.
 - sell_through = copies sold in the period / (copies in stock now + copies sold in the period) × 100, i.e. sold / (stock
   at the period start + copies added in it), one decimal; sell_through_prev is the previous period's, its end stock
-  being now's + sold − added in the period (added: copies of the items created in it). Of ?game (all: every game);
-  sold copies follow ?market.
-- movers and alerts are of ?game (all: every game); alert hrefs are SPA paths (a collection alert of every game opens
-  the game with most such items).
+  being now's + sold − added in the period (added: copies of the items created in it). Sold copies follow ?market.
+- stock_by_set: the game's STOCK_SETS sets with the largest trend value in stock, largest first.
+- movers and the collection alerts are of ?game; the orders to pack and the locations almost full are of every game
+  (packing and storage are shared). Alert hrefs are SPA paths.
 """
 
 from collections import Counter
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from django.db.models import Avg, Count, DecimalField, ExpressionWrapper, F, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum
 from django.db.models.functions import Abs
 from django.utils import timezone
 from rest_framework.decorators import api_view
@@ -28,7 +31,7 @@ from rest_framework.response import Response
 
 from .. import shipping
 from ..cardmarket import item_guide_price, trend_price
-from ..models import MAGIC, CollectionItem, Game, Market, Order, OrderItem
+from ..models import MAGIC, CollectionItem, Expansion, Game, Market, Order, OrderItem
 from .collection import STALE_DAYS, _views, _with_blueprint
 from .common import doc, query
 from .locations import location_rows
@@ -37,6 +40,7 @@ from .orders import OPEN_STATES, _TAB_FILTERS
 TAGS = ["overview"]
 WEEKS = 12
 MOVERS = 6
+STOCK_SETS = 5
 PERIODS = ["7d", "30d", "qtd", "ytd"]
 FULL_PCT = Decimal("95")  # a location this full (used / capacity, %) is almost full
 NOT_REVENUE = [Order.State.CANCELED, Order.State.CLOSED]  # as the orders page's revenue_month
@@ -69,9 +73,35 @@ def period_bounds(period, now):
     return (start, now), (prev_start, prev_start + (now - start))
 
 
-def _revenue_weeks(orders, today):
-    """WEEKS Monday-start weeks up to this one, oldest first, with the total of the orders paid in each and their
-    lines' value split into singles and sealed."""
+def _share(order, game):
+    """The share of `order`'s value in its lines of `game` (0 when it has none): price × quantity, evenly when no
+    line has a price. The order's lines must be prefetched with their listing's item's card."""
+    lines = list(order.items.all())
+    mine = [line for line in lines if line.listing is not None and line.listing.item.card.game_id == game.pk]
+    if not mine:
+        return Decimal("0")
+    values = {line.pk: (line.price or Decimal("0")) * line.quantity for line in lines}
+    whole = sum(values.values(), Decimal("0"))
+    if whole:
+        return sum((values[line.pk] for line in mine), Decimal("0")) / whole
+    return Decimal(len(mine)) / len(lines)
+
+
+def _counted(orders, game, start, end):
+    """[(order, share)] of the orders paid in [start, end) with a line of `game`."""
+    window = (orders.filter(paid_at__gte=start, paid_at__lt=end)
+              .prefetch_related("items__listing__item__card"))
+    return [(o, share) for o in window if (share := _share(o, game))]
+
+
+def _revenue(counted):
+    totals = [o.total * share for o, share in counted if o.total is not None]
+    return sum(totals, Decimal("0")) if totals else None
+
+
+def _revenue_weeks(orders, game, today):
+    """WEEKS Monday-start weeks up to this one, oldest first, with the game's share of the total of the orders paid in
+    each and its lines' value split into singles and sealed."""
     first = today - timedelta(days=today.weekday() + 7 * (WEEKS - 1))
     zero = Decimal("0")
     weeks = {first + timedelta(weeks=i): {"total": zero, "singles": zero, "sealed": zero} for i in range(WEEKS)}
@@ -81,10 +111,11 @@ def _revenue_weeks(orders, today):
         day = timezone.localdate(paid_at)
         return weeks.get(day - timedelta(days=day.weekday()))
 
-    for paid_at, total in orders.filter(paid_at__gte=start, total__isnull=False).values_list("paid_at", "total"):
-        if (week := week_of(paid_at)) is not None:
-            week["total"] += total
-    lines = (OrderItem.objects.filter(order__in=orders, order__paid_at__gte=start, price__isnull=False)
+    for order, share in _counted(orders, game, start, timezone.now() + timedelta(days=1)):
+        if order.total is not None and (week := week_of(order.paid_at)) is not None:
+            week["total"] += order.total * share
+    lines = (OrderItem.objects.filter(order__in=orders, order__paid_at__gte=start, price__isnull=False,
+                                      listing__item__card__game=game)
              .values_list("order__paid_at", "listing__item__card__is_product").annotate(v=Sum(LINE_VALUE))
              .order_by())
     for paid_at, is_product, value in lines:
@@ -94,18 +125,20 @@ def _revenue_weeks(orders, today):
             for week, totals in weeks.items()]
 
 
-def _stock_by_game(user):
-    items = CollectionItem.objects.owned_by(user).annotate(trend=trend_price())
-    return [
-        {"game": g.slug, "name": g.name,
-         "value": _money(items.filter(card__game=g).aggregate(v=Sum(VALUE))["v"] or Decimal("0"))}
-        for g in Game.objects.order_by("name")
-    ]
+def _stock_by_set(user, game):
+    """The game's STOCK_SETS sets with the largest trend value in stock: [{code, name, value}], largest first."""
+    totals = {}
+    for code, value in (_items(user, game).filter(quantity__gt=0).annotate(trend=trend_price())
+                        .values_list("card__set_code", VALUE)):
+        if value is not None:
+            totals[code] = totals.get(code, Decimal("0")) + value
+    top = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:STOCK_SETS]
+    names = dict(Expansion.objects.filter(game=game, code__in=[c.lower() for c, _ in top]).values_list("code", "name"))
+    return [{"code": code, "name": names.get(code.lower()) or code or "—", "value": _money(value)} for code, value in top]
 
 
 def _items(user, game):
-    items = CollectionItem.objects.owned_by(user)
-    return items.filter(card__game=game) if game is not None else items
+    return CollectionItem.objects.owned_by(user).filter(card__game=game)
 
 
 def _movers(user, game):
@@ -130,9 +163,7 @@ def _movers(user, game):
 
 
 def _sold(lines, game, start, end):
-    lines = lines.filter(order__paid_at__gte=start, order__paid_at__lt=end)
-    if game is not None:
-        lines = lines.filter(listing__item__card__game=game)
+    lines = lines.filter(order__paid_at__gte=start, order__paid_at__lt=end, listing__item__card__game=game)
     return lines.aggregate(n=Sum("quantity"))["n"] or 0
 
 
@@ -153,15 +184,7 @@ def _plural(n, word, plural=None):
     return f"{n} {word if n == 1 else plural or word + 's'}"
 
 
-def _top_slug(items, game):
-    """The game slug a collection alert opens: ?game's, else the game with most of these items."""
-    if game is not None:
-        return game.slug
-    top = items.values("card__game__slug").annotate(n=Count("pk")).order_by("-n", "card__game__slug").first()
-    return top["card__game__slug"] if top else MAGIC
-
-
-def _order_alert(user, market, today):
+def _order_alert(user, game, market, today):
     orders = Order.objects.owned_by(user).with_stage().filter(_TAB_FILTERS["to_pack"])
     if market:
         orders = orders.filter(market=market)
@@ -179,7 +202,7 @@ def _order_alert(user, market, today):
     if paid:
         parts.append(f"oldest {_plural((today - timezone.localdate(min(paid))).days, 'day')}")
     return {"kind": "orders_to_pack", "title": f"{_plural(len(orders), 'order')} to pack", "sub": " · ".join(parts),
-            "href": "/orders?tab=to_pack", "tone": "danger" if overdue else "warn"}
+            "href": f"/{game.slug}/orders?tab=to_pack", "tone": "danger" if overdue else "warn"}
 
 
 def _collection_alerts(user, game):
@@ -194,7 +217,7 @@ def _collection_alerts(user, game):
         euro = sum(((t - p) * q for t, p, q in below), Decimal("0"))
         alerts.append({"kind": "below_trend", "title": f"{_plural(len(below), 'listing')} below trend",
                        "sub": f"avg −{sum(gaps) / len(gaps):.1f}% · €{euro:.2f} under trend",
-                       "href": f"/{_top_slug(below_items, game)}/?view=below_trend", "tone": "warn"})
+                       "href": f"/{game.slug}/?view=below_trend", "tone": "warn"})
 
     unlisted = items.filter(views["not_listed"], quantity__gt=0)
     totals = unlisted.aggregate(copies=Sum("quantity"), value=Sum(VALUE))
@@ -206,14 +229,14 @@ def _collection_alerts(user, game):
             code, n = sorted(lots.items(), key=lambda kv: (-kv[1], kv[0]))[0]
             sub += f" · {n} from {code}"
         alerts.append({"kind": "not_listed", "title": f"{_plural(totals['copies'], 'copy', 'copies')} not listed",
-                       "sub": sub, "href": f"/{_top_slug(unlisted, game)}/?view=not_listed", "tone": "info"})
+                       "sub": sub, "href": f"/{game.slug}/?view=not_listed", "tone": "info"})
 
     stale = items.filter(views["stale"])
     totals = stale.aggregate(n=Count("pk"), value=Sum(VALUE))
     if totals["n"]:
         alerts.append({"kind": "stale", "title": f"{_plural(totals['n'], 'item')} unsold for {STALE_DAYS}+ days",
                        "sub": f"€{totals['value'] or 0:.2f} at trend",
-                       "href": f"/{_top_slug(stale, game)}/?view=stale", "tone": "info"})
+                       "href": f"/{game.slug}/?view=stale", "tone": "info"})
     return alerts
 
 
@@ -222,8 +245,7 @@ def _location_alert(user, game):
             if r["capacity"] and Decimal(r["used"]) * 100 >= FULL_PCT * r["capacity"]]
     if not full:
         return None
-    slug = game.slug if game is not None else MAGIC
-    href = f"/{slug}/?location={full[0]['code']}" if len(full) == 1 else f"/{slug}/"
+    href = f"/{game.slug}/?location={full[0]['code']}" if len(full) == 1 else f"/{game.slug}/locations"
     return {"kind": "locations_full", "title": f"{_plural(len(full), 'location')} almost full",
             "sub": " · ".join(f"{r['code']} {r['used']}/{r['capacity']}" for r in full[:5]),
             "href": href, "tone": "warn"}
@@ -232,18 +254,16 @@ def _location_alert(user, game):
 def alerts(user, game, market, today):
     """[{kind, title, sub, href, tone}] (tone danger|warn|info): orders to pack, listings below trend, copies not
     listed, stale items, locations almost full (used ≥ 95% of the capacity); only those that apply."""
-    out = [_order_alert(user, market, today), *_collection_alerts(user, game), _location_alert(user, game)]
+    out = [_order_alert(user, game, market, today), *_collection_alerts(user, game), _location_alert(user, game)]
     return [a for a in out if a is not None]
 
 
 def _filters(params):
     slug = params.get("game", "").strip() or MAGIC
-    game = None
-    if slug != "all":
-        try:
-            game = Game.by_slug(slug)
-        except Game.DoesNotExist:
-            raise ValidationError({"game": [f"Unknown game '{slug}'."]}) from None
+    try:
+        game = Game.by_slug(slug)
+    except Game.DoesNotExist:
+        raise ValidationError({"game": [f"Unknown game '{slug}'."]}) from None
     market = params.get("market", "").strip()
     if market and market not in Market.values:
         raise ValidationError({"market": ["cm, ct or empty."]})
@@ -253,11 +273,11 @@ def _filters(params):
     return game, market, period
 
 
-@doc(TAGS, "Dashboard: revenue, orders, basket and gross profit of ?period with the previous period's revenue (orders "
-           "of every game, of ?market), weekly revenue with singles and sealed, sell-through, stock value per game, "
-           "the price movers and the alerts of ?game (all: every game). See ledger/api/overview.py for the rules",
+@doc(TAGS, "Dashboard of ?game: revenue, orders, basket and gross profit of ?period with the previous period's revenue "
+           "(the orders with a line of the game, for its share; of ?market), weekly revenue with singles and sealed, "
+           "sell-through, stock value by set, the price movers and the alerts. See ledger/api/overview.py for the rules",
      parameters=[
-         query("game", f"Slug of the game (default {MAGIC}) or all"),
+         query("game", f"Slug of the game (default {MAGIC})"),
          query("market", "cm or ct: only that market's orders; empty: every market", enum=["cm", "ct", ""]),
          query("period", "7d, 30d (default), qtd (quarter to date) or ytd (year to date)", enum=PERIODS),
      ])
@@ -270,31 +290,32 @@ def overview(request):
     orders = Order.objects.owned_by(user).exclude(state__in=NOT_REVENUE)
     if market:
         orders = orders.filter(market=market)
-    last = orders.filter(paid_at__gte=current[0], paid_at__lt=current[1]).aggregate(
-        revenue=Sum("total"), n=Count("pk"), basket=Avg("total"))
-    before = orders.filter(paid_at__gte=prev[0], paid_at__lt=prev[1]).aggregate(revenue=Sum("total"))
+    counted = _counted(orders, game, *current)
+    total = _revenue(counted)
     profit = (OrderItem.objects.owned_by(user)
               .filter(order__in=orders, order__paid_at__gte=current[0], order__paid_at__lt=current[1],
-                      price__isnull=False, listing__item__cost__isnull=False)
+                      price__isnull=False, listing__item__cost__isnull=False, listing__item__card__game=game)
               .aggregate(v=Sum(PROFIT))["v"])
     sell_through, sell_through_prev = _sell_through(user, orders, game, current, prev)
-    revenue, revenue_prev, basket = _money(last["revenue"]), _money(before["revenue"]), _money(last["basket"])
+    revenue, revenue_prev = _money(total), _money(_revenue(_counted(orders, game, *prev)))
+    n = len(counted)
+    basket = _money(total / n) if total is not None and n else None
     return Response({
         "period": period,
         "revenue": revenue,
         "revenue_prev": revenue_prev,
-        "orders": last["n"],
+        "orders": n,
         "avg_basket": basket,
         "gross_profit": _money(profit),
-        "revenue_weeks": _revenue_weeks(orders, timezone.localdate(now)),
+        "revenue_weeks": _revenue_weeks(orders, game, timezone.localdate(now)),
         "revenue_30d": revenue,
         "revenue_prev_30d": revenue_prev,
-        "orders_30d": last["n"],
+        "orders_30d": n,
         "avg_basket_30d": basket,
         "gross_profit_30d": _money(profit),
         "sell_through": sell_through,
         "sell_through_prev": sell_through_prev,
-        "stock_by_game": _stock_by_game(user),
+        "stock_by_set": _stock_by_set(user, game),
         "movers": _movers(user, game),
         "alerts": alerts(user, game, market, timezone.localdate(now)),
     })
