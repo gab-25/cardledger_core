@@ -5,12 +5,9 @@ from django.contrib.auth.forms import AuthenticationForm
 from ledger.forms import keep_absent
 from ledger.models import Condition
 
-from .models import BusinessDetails, Profile, SellerSettings
+from .models import Profile, SellerSettings
 
 PRICE_ROUNDINGS = [("", "Default (0.05)"), ("0.05", "0.05"), ("0.10", "0.10"), ("0.50", "0.50"), ("1.00", "1.00")]
-LOGO_MAX_BYTES = 2 * 1024 * 1024
-# Signatures of the raster images taken as a logo (no SVG: it could carry scripts).
-IMAGE_SIGNATURES = {b"\x89PNG\r\n\x1a\n": "png", b"\xff\xd8\xff": "jpg", b"GIF87a": "gif", b"GIF89a": "gif"}
 
 
 class ProfileForm(forms.ModelForm):
@@ -28,13 +25,13 @@ class ProfileForm(forms.ModelForm):
 
 
 class BusinessProfileForm(forms.ModelForm):
-    """The business details of the profile; left out of the request, a field keeps its value."""
+    """The shop name of the profile; left out of the request, it keeps its value."""
 
-    OPTIONAL = ["shop_name", "vat_number"]
+    OPTIONAL = ["shop_name"]
 
     class Meta:
         model = Profile
-        fields = ["shop_name", "vat_number"]
+        fields = ["shop_name"]
 
     def __init__(self, data=None, *args, instance=None, **kwargs):
         super().__init__(keep_absent(data, instance, self.OPTIONAL), *args, instance=instance, **kwargs)
@@ -69,40 +66,6 @@ class LoginForm(AuthenticationForm):
             users = list(User.objects.filter(email__iexact=login)[:2])
             user = users[0] if len(users) == 1 else None
         return user
-
-
-class BusinessForm(forms.ModelForm):
-    """The business details; left out of the request, a field keeps its value (partial PUT)."""
-
-    class Meta:
-        model = BusinessDetails
-        fields = ["legal_name", "tax_code", "phone", "buyer_email", "website", "ship_street", "ship_city",
-                  "ship_postcode", "ship_country", "invoice_prefix", "invoice_next_number", "invoice_footer"]
-
-    def __init__(self, data=None, *args, instance=None, **kwargs):
-        super().__init__(keep_absent(data, instance, self.Meta.fields), *args, instance=instance, **kwargs)
-        self.fields["invoice_next_number"].min_value = 1
-        self.fields["invoice_next_number"].validators.append(_min_one)
-
-
-def _min_one(value):
-    if value is not None and value < 1:
-        raise forms.ValidationError("Ensure this value is greater than or equal to 1.")
-
-
-class LogoForm(forms.Form):
-    logo = forms.FileField(help_text="PNG, JPEG or GIF image, at most 2 MB")
-
-    def clean_logo(self):
-        logo = self.cleaned_data["logo"]
-        if logo.size > LOGO_MAX_BYTES:
-            raise forms.ValidationError("The logo must be at most 2 MB.")
-        head = logo.read(16)
-        logo.seek(0)
-        if not any(head.startswith(sig) for sig in IMAGE_SIGNATURES) and not (
-                head[:4] == b"RIFF" and head[8:12] == b"WEBP"):
-            raise forms.ValidationError("Upload a PNG, JPEG, GIF or WebP image.")
-        return logo
 
 
 class SellerSettingsForm(forms.ModelForm):

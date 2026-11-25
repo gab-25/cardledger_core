@@ -424,7 +424,6 @@ class Order(models.Model):
     packed_at = models.DateTimeField(null=True, blank=True, help_text="When the seller packed it")
     issue_note = models.TextField(blank=True, help_text="A problem noted by the seller")
     issue_at = models.DateTimeField(null=True, blank=True)
-    invoice_number = models.CharField(max_length=40, blank=True, help_text="Given when its packing slip is printed")
     raw = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 

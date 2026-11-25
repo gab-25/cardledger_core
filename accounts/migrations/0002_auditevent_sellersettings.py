@@ -29,29 +29,6 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.CreateModel(
-            name='BusinessDetails',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('legal_name', models.CharField(blank=True, max_length=200)),
-                ('tax_code', models.CharField(blank=True, max_length=40)),
-                ('phone', models.CharField(blank=True, max_length=40)),
-                ('buyer_email', models.EmailField(blank=True, max_length=254, verbose_name='email for buyers')),
-                ('website', models.URLField(blank=True, max_length=300)),
-                ('ship_street', models.CharField(blank=True, max_length=300, verbose_name='ship-from street')),
-                ('ship_city', models.CharField(blank=True, max_length=120, verbose_name='ship-from city')),
-                ('ship_postcode', models.CharField(blank=True, max_length=20, verbose_name='ship-from postcode')),
-                ('ship_country', models.CharField(blank=True, max_length=80, verbose_name='ship-from country')),
-                ('invoice_prefix', models.CharField(blank=True, max_length=20)),
-                ('invoice_next_number', models.PositiveIntegerField(default=1)),
-                ('invoice_footer', models.TextField(blank=True)),
-                ('logo', models.FileField(blank=True, upload_to='logos/')),
-                ('user', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='business', to=settings.AUTH_USER_MODEL)),
-            ],
-            options={
-                'verbose_name_plural': 'business details',
-            },
-        ),
-        migrations.CreateModel(
             name='SellerSettings',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),

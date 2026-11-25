@@ -1,14 +1,11 @@
-"""Login by email and remember, password reset, me's counters and markets, business details and logo, seller
+"""Login by email and remember, password reset, me's counters and markets, seller
 settings, the activity log."""
 
 import re
-import shutil
-import tempfile
 
 from django.contrib.auth import get_user_model
 from django.core import mail
-from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import Client, TestCase, override_settings
+from django.test import Client, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
@@ -16,9 +13,7 @@ from ledger import services
 from ledger.models import CardmarketPrice, Listing, SyncLog
 from ledger.test_game_api import pokemon_setup
 
-from .models import AuditEvent, BusinessDetails, Profile, SellerSettings, record
-
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+from .models import AuditEvent, Profile, SellerSettings, record
 
 
 class LoginTest(TestCase):
@@ -171,93 +166,6 @@ class MeTest(TestCase):
         self.assertEqual(self.market()["status"], "off")
 
 
-class BusinessTest(TestCase):
-    def setUp(self):
-        User = get_user_model()
-        self.user = User.objects.create_user("gab", password="pw")
-        self.other = User.objects.create_user("ami", password="pw")
-        self.client.force_login(self.user)
-        self.url = reverse("accounts:api_business")
-        self.media = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.media, ignore_errors=True)
-        override = override_settings(MEDIA_ROOT=self.media)
-        override.enable()
-        self.addCleanup(override.disable)
-
-    def put(self, data):
-        return self.client.put(self.url, data, content_type="application/json")
-
-    def test_empty(self):
-        data = self.client.get(self.url).json()
-        self.assertEqual(data["invoice_next_number"], 1)
-        self.assertEqual(data["logo_url"], "")
-        self.assertEqual(set(data), {
-            "shop_name", "legal_name", "vat_number", "tax_code", "phone", "buyer_email", "website", "ship_street",
-            "ship_city", "ship_postcode", "ship_country", "invoice_prefix", "invoice_next_number", "invoice_footer",
-            "logo_url"})
-        self.assertFalse(BusinessDetails.objects.exists())
-
-    def test_partial_put(self):
-        resp = self.put({"shop_name": "Gab Cards", "vat_number": "IT1", "legal_name": "Gab Srl",
-                         "buyer_email": "shop@example.com", "website": "https://gab.example", "invoice_prefix": "GC-",
-                         "invoice_next_number": 42, "ship_city": "Roma"})
-        self.assertEqual(resp.status_code, 200, resp.json())
-        self.assertEqual(resp.json()["messages"], [{"level": "success", "text": "Business details saved."}])
-        self.put({"phone": "+39 06 1234"})  # the rest keeps its value
-        data = self.client.get(self.url).json()
-        self.assertEqual((data["shop_name"], data["vat_number"], data["legal_name"], data["invoice_next_number"],
-                          data["ship_city"], data["phone"]), ("Gab Cards", "IT1", "Gab Srl", 42, "Roma", "+39 06 1234"))
-        self.assertEqual(Profile.objects.get(user=self.user).shop_name, "Gab Cards")  # on the profile, as before
-        self.assertEqual(self.client.get(reverse("accounts:api_me")).json()["user"]["shop_name"], "Gab Cards")
-        self.client.force_login(self.other)
-        self.assertEqual(self.client.get(self.url).json()["legal_name"], "")
-
-    def test_validation(self):
-        resp = self.put({"buyer_email": "nope", "website": "not a url", "invoice_next_number": 0})
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(set(resp.json()), {"buyer_email", "website", "invoice_next_number"})
-        self.assertFalse(BusinessDetails.objects.exists())
-
-    def logo(self, content=PNG, name="logo.png", content_type="image/png"):
-        return self.client.post(reverse("accounts:api_business_logo"),
-                                {"logo": SimpleUploadedFile(name, content, content_type=content_type)})
-
-    def test_logo_upload_and_remove(self):
-        resp = self.logo()
-        self.assertEqual(resp.status_code, 200, resp.json())
-        url = resp.json()["logo_url"]
-        self.assertTrue(url.startswith("/media/logos/"))
-        self.assertEqual(self.client.get(self.url).json()["logo_url"], url)
-        served = self.client.get(url)
-        self.assertEqual((served.status_code, served["Content-Type"]), (200, "image/png"))
-        self.assertEqual(b"".join(served.streaming_content), PNG)
-        resp = self.client.delete(reverse("accounts:api_business_logo"))
-        self.assertEqual(resp.json()["messages"], [{"level": "success", "text": "Logo removed."}])
-        self.assertEqual(self.client.get(self.url).json()["logo_url"], "")
-        self.assertEqual(self.client.get(url).status_code, 404)
-
-    def test_new_logo_replaces_the_old_file(self):
-        first = self.logo().json()["logo_url"]
-        second = self.logo().json()["logo_url"]
-        self.assertNotEqual(first, second)
-        self.assertEqual(self.client.get(first).status_code, 404)
-
-    def test_logo_must_be_an_image_under_2mb(self):
-        resp = self.logo(b"<svg onload=alert(1)>", "logo.svg", "image/svg+xml")
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("logo", resp.json())
-        resp = self.logo(PNG + b"\x00" * (2 * 1024 * 1024))
-        self.assertEqual(resp.json()["logo"], ["The logo must be at most 2 MB."])
-        self.assertIn("logo", self.client.post(reverse("accounts:api_business_logo"), {}).json())
-
-    def test_logo_is_per_user(self):
-        self.logo()
-        self.client.force_login(self.other)
-        self.assertEqual(self.client.get(self.url).json()["logo_url"], "")
-        self.client.delete(reverse("accounts:api_business_logo"))
-        self.assertTrue(BusinessDetails.objects.get(user=self.user).logo)
-
-
 class SellerSettingsTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -326,8 +234,10 @@ class ActivityTest(TestCase):
 class SchemaDocsTest(TestCase):
     def test_new_endpoints_are_documented(self):
         schema = self.client.get(reverse("api_schema"), HTTP_ACCEPT="application/vnd.oai.openapi+json").json()
-        for path in ["/api/auth/password-reset/", "/api/auth/password-reset/confirm/", "/api/account/business/",
-                     "/api/account/business/logo/", "/api/account/settings/", "/api/account/activity/",
+        for path in ["/api/auth/password-reset/", "/api/auth/password-reset/confirm/",
+                     "/api/account/settings/", "/api/account/activity/",
                      "/api/catalog/report-missing/"]:
             self.assertIn(path, schema["paths"])
+        for path in ["/api/account/business/", "/api/account/business/logo/"]:  # single user: no business details
+            self.assertNotIn(path, schema["paths"])
 

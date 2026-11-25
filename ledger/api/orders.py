@@ -16,7 +16,7 @@ from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from .. import services, shipping
+from .. import shipping
 from ..forms import IssueForm, PackForm, PickedForm
 from ..models import Market, MarketConnection, Order, OrderItem
 from ..presentation import OLD_ORDER_TABS, ORDER_TABS, order_badge
@@ -91,7 +91,6 @@ def _row(order, today):
         "items_count": order.items_count,
         "packed_at": order.packed_at,
         "issue_note": order.issue_note,
-        "invoice_number": order.invoice_number,
     }
 
 
@@ -338,20 +337,18 @@ def pick_list(request):
     })
 
 
-@doc(TAGS, "Packing slips of some orders: the business details (as GET /api/account/business/) and each order as "
-           "GET /api/orders/<id>/ answers it. Orders without an invoice number get the next ones, in the order "
-           "asked: invoice_prefix + invoice_next_number zero-padded to 4 digits, which then moves on",
+@doc(TAGS, "Packing slips of some orders: the sender (business.shop_name, the profile's) and each order as "
+           "GET /api/orders/<id>/ answers it",
      parameters=[IDS])
 @extend_schema(operation_id="orders_slips")
 @api_view(["GET"])
 def slips(request):
-    from accounts.api import business_data
+    from accounts.models import profile_of
 
     selected = _selected(request, orders_of(request.user).prefetch_related("items__listing__item"))
-    services.assign_invoice_numbers(request.user, selected)
     today = timezone.localdate()
     queue = _to_pack_queue(request.user, today)
     return Response({
-        "business": business_data(request.user),
+        "business": {"shop_name": profile_of(request.user).shop_name},
         "orders": [_detail(o, today, _next_after(queue, o.pk)) for o in selected],
     })

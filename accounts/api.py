@@ -1,5 +1,5 @@
 """The account API (/api/me/, /api/auth/, /api/account/): who is logged in, login/logout, password reset, profile,
-business details, seller settings and the activity (security) log.
+seller settings and the activity (security) log.
 
 Authentication is the Django session; CSRF comes from the csrftoken cookie, sent back as X-CSRFToken.
 """
@@ -7,15 +7,13 @@ Authentication is the Django session; CSRF comes from the csrftoken cookie, sent
 from django.contrib.auth import get_user_model, login, logout, password_validation, update_session_auth_hash
 from django.contrib.auth.forms import PasswordChangeForm, PasswordResetForm, SetPasswordForm
 from django.contrib.auth.tokens import default_token_generator
-from django.core.files.storage import default_storage
 from django.db.models import Max, Sum
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from rest_framework import serializers, status
-from rest_framework.decorators import api_view, authentication_classes, parser_classes, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.exceptions import ValidationError
-from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
@@ -27,8 +25,8 @@ from ledger.api.shipments import problem_count
 from ledger.extension import extension_state
 from ledger.models import CardmarketPrice, CollectionItem, Listing, Order, PurchaseLot, RepricingRule
 
-from .forms import BusinessForm, BusinessProfileForm, LoginForm, LogoForm, ProfileForm, SellerSettingsForm
-from .models import AuditEvent, business_of, profile_of, record, seller_settings_of
+from .forms import BusinessProfileForm, LoginForm, ProfileForm, SellerSettingsForm
+from .models import AuditEvent, profile_of, record, seller_settings_of
 
 TAGS = ["account"]
 
@@ -45,7 +43,6 @@ def _user(user):
         "date_joined": user.date_joined,
         "last_login": user.last_login,
         "shop_name": profile.shop_name,
-        "vat_number": profile.vat_number,
     }
 
 
@@ -181,8 +178,7 @@ def account(request):
     return Response({"password_help": password_validation.password_validators_help_texts()})
 
 
-@doc(TAGS, "Change first name, last name and email, and the business details (shop name, VAT number: left out, "
-           "they keep their value)",
+@doc(TAGS, "Change first name, last name and email, and the shop name (left out, it keeps its value)",
      request=form_body("Profile", ProfileForm, **form_fields(BusinessProfileForm)))
 @api_view(["PUT"])
 def profile(request):
@@ -210,59 +206,6 @@ def password(request):
     update_session_auth_hash(request, form.user)  # stay logged in
     record(request.user, AuditEvent.Kind.PASSWORD_CHANGED, request)
     return messages_response(msg("success", "Password changed."))
-
-
-def business_data(user):
-    """The business details as GET /api/account/business/ answers them (also the packing slips' header)."""
-    profile, business = profile_of(user), business_of(user)
-    data = {"shop_name": profile.shop_name, "vat_number": profile.vat_number}
-    data.update({name: getattr(business, name) for name in BusinessForm.Meta.fields})
-    data["logo_url"] = business.logo.url if business.logo else ""
-    return data
-
-
-@doc(TAGS, "The business details for packing slips and invoices (GET) or change them (PUT; a key left out keeps its "
-           "value). shop_name and vat_number are the profile's",
-     request=form_body("Business", BusinessForm, **form_fields(BusinessProfileForm)))
-@api_view(["GET", "PUT"])
-def business(request):
-    user = request.user
-    if request.method == "GET":
-        return Response(business_data(user))
-    form = BusinessForm(request.data, instance=business_of(user))
-    profile = BusinessProfileForm(request.data, instance=profile_of(user))
-    valid = form.is_valid()
-    if not profile.is_valid():
-        form.errors.update(profile.errors)
-        valid = False
-    if not valid:
-        raise form_errors(form)
-    form.save()
-    profile.save()
-    return messages_response(msg("success", "Business details saved."))
-
-
-@doc(TAGS, "Upload the business logo (POST multipart 'logo': PNG, JPEG, GIF or WebP, at most 2 MB; answers its "
-           "logo_url) or remove it (DELETE)", request={"multipart/form-data": form_body("BusinessLogo", LogoForm)})
-@api_view(["POST", "DELETE"])
-@parser_classes([MultiPartParser])
-def business_logo(request):
-    details = business_of(request.user)
-    old = details.logo.name if details.logo else ""
-    if request.method == "DELETE":
-        if old:
-            details.logo = ""
-            details.save(update_fields=["logo"])
-            default_storage.delete(old)
-        return messages_response(msg("success", "Logo removed."))
-    form = LogoForm(data={}, files=request.FILES)
-    if not form.is_valid():
-        raise form_errors(form)
-    details.logo = form.cleaned_data["logo"]
-    details.save()
-    if old and old != details.logo.name:
-        default_storage.delete(old)
-    return messages_response(msg("success", "Logo uploaded."), logo_url=details.logo.url)
 
 
 def _seller_settings(settings):

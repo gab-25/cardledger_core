@@ -448,34 +448,3 @@ def resolve_conflict(conflict, keep):
             f"({conflict.get_resolution_display().lower()})",
             owner=conflict.item.owner,
         )
-
-
-def assign_invoice_numbers(user, orders):
-    """Give each of user's orders (in this order) that has none the next invoice number of the user's business
-    details: invoice_prefix + invoice_next_number zero-padded to 4 digits (e.g. "CL-0042"), then incremented. The
-    business row is locked (select_for_update) so concurrent prints never share a number. Updates the orders in
-    place and returns them."""
-    from accounts.models import BusinessDetails
-
-    missing = [o.pk for o in orders if not o.invoice_number]
-    if not missing:
-        return orders
-    with transaction.atomic():
-        BusinessDetails.objects.get_or_create(user=user)
-        business = BusinessDetails.objects.select_for_update().get(user=user)
-        # re-read under the lock: another print may have numbered some meanwhile
-        current = dict(Order.objects.owned_by(user).select_for_update().filter(pk__in=missing)
-                       .values_list("pk", "invoice_number"))
-        number = business.invoice_next_number
-        for order in orders:
-            if order.pk not in current:
-                continue
-            if current[order.pk]:
-                order.invoice_number = current[order.pk]
-                continue
-            order.invoice_number = f"{business.invoice_prefix}{number:04d}"
-            Order.objects.filter(pk=order.pk).update(invoice_number=order.invoice_number)
-            number += 1
-        business.invoice_next_number = number
-        business.save(update_fields=["invoice_next_number"])
-    return orders

@@ -3,11 +3,10 @@ from django.db import models
 
 
 class Profile(models.Model):
-    """A user's business details (shop name, VAT number), created on demand by profile_of()."""
+    """A user's profile extras (the shop name), created on demand by profile_of()."""
 
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
     shop_name = models.CharField(max_length=120, blank=True)
-    vat_number = models.CharField("VAT number", max_length=40, blank=True)
 
     def __str__(self):
         return self.shop_name or f"Profile of {self.user}"
@@ -18,36 +17,6 @@ def profile_of(user, create=False):
     if create:
         return Profile.objects.get_or_create(user=user)[0]
     return Profile.objects.filter(user=user).first() or Profile(user=user)
-
-
-class BusinessDetails(models.Model):
-    """The seller's business details for packing slips and invoices (shop name and VAT number stay on Profile)."""
-
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="business")
-    legal_name = models.CharField(max_length=200, blank=True)
-    tax_code = models.CharField(max_length=40, blank=True)
-    phone = models.CharField(max_length=40, blank=True)
-    buyer_email = models.EmailField("email for buyers", blank=True)
-    website = models.URLField(max_length=300, blank=True)
-    ship_street = models.CharField("ship-from street", max_length=300, blank=True)
-    ship_city = models.CharField("ship-from city", max_length=120, blank=True)
-    ship_postcode = models.CharField("ship-from postcode", max_length=20, blank=True)
-    ship_country = models.CharField("ship-from country", max_length=80, blank=True)
-    invoice_prefix = models.CharField(max_length=20, blank=True)
-    invoice_next_number = models.PositiveIntegerField(default=1)
-    invoice_footer = models.TextField(blank=True)
-    logo = models.FileField(upload_to="logos/", blank=True)
-
-    class Meta:
-        verbose_name_plural = "business details"
-
-    def __str__(self):
-        return self.legal_name or f"Business of {self.user}"
-
-
-def business_of(user):
-    """The user's BusinessDetails; an unsaved blank one when they have none."""
-    return BusinessDetails.objects.filter(user=user).first() or BusinessDetails(user=user)
 
 
 class SellerSettings(models.Model):

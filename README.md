@@ -10,7 +10,7 @@ its `index.html` for every page URL and its assets under `/static/ui/`.
 
 - `config/` — Django project (settings, root URLs); `config/views.py` serves the built React UI (`index.html` for
   every URL that is not `/api/`, `/admin/` or `/static/`)
-- `accounts/` — account API (`accounts/api.py`): who is logged in, login/logout, profile, password, business details
+- `accounts/` — account API (`accounts/api.py`): who is logged in, login/logout, profile (shop name), password
 - `ledger/` — domain: cards, collection, sale listings per market, orders, the extension's sync (`ledger/extension.py`), CSV
   import/export;
   `ledger/api/` is the JSON API of every page (collection, sale, cards, orders, sync, scan)

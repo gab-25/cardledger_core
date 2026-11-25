@@ -41,8 +41,8 @@ There is no linter or formatter configured. Settings come only from the environm
 ## Architecture
 
 - **Apps**: `config/` (settings, root URLs, the UI view), `accounts/` (auth and profile API in `accounts/api.py`;
-  `accounts.Profile`, one-to-one with the user and created on demand by `profile_of`, holds the business details
-  `shop_name`/`vat_number`, shown in `me`'s `user` and saved by `PUT /api/account/profile/`),
+  `accounts.Profile`, one-to-one with the user and created on demand by `profile_of`, holds the shop name
+  `shop_name` (single user: no business details, VAT, invoices or team), shown in `me`'s `user` and saved by `PUT /api/account/profile/`),
   `ledger/` (the domain). Views in `ledger/api/*.py` and `accounts/api.py` are function-based DRF `@api_view`s, one
   module per UI page; business logic lives in `ledger/services.py` (CSV, market connections, orders, shared stock,
   conflicts), `ledger/extension.py` and `ledger/scan.py`, not in the views.
@@ -151,7 +151,7 @@ There is no linter or formatter configured. Settings come only from the environm
   (enabled, not draft) and `rules_total`. The old collection bulk list/reprice (`services.list_at_trend`) still works
   as before.
 - **Orders pick/pack/ship** (`ledger/api/orders.py`, helpers `ledger/shipping.py`): `Order.packed_at`, `issue_note`/
-  `issue_at`, `invoice_number`, `OrderItem.picked`. `Order.objects.with_stage()` annotates `stage` (first that
+  `issue_at`, `OrderItem.picked`. `Order.objects.with_stage()` annotates `stage` (first that
   applies): issue (an issue note, request_for_cancel, lost, canceled with paid_at), shipped (sent/arrived/done, also
   closed and unpaid canceled: nothing to pack), packed, picking (a line picked), to_pack. Orders still to ship (paid,
   hub_pending) have `due_by` = local date of paid_at + max_shipping_days **working** days (Mon-Fri, 2 when null) and
@@ -162,9 +162,8 @@ There is no linter or formatter configured. Settings come only from the environm
   orders/<pk>/pack/ {force}` (409 `blocked` if a line is unpicked or the order is not paid/hub_pending; answers
   `next_id`), `unpack/`, `issue/ {note}` (blank clears). `GET orders/pick-list/?ids=` merges lines by collection item
   (else name/expansion/condition/language/foil), sorted by location (empty last) then name; `GET orders/slips/?ids=`
-  gives `business` (`accounts.api.business_data`) and the order details, numbering those without an invoice number
-  (`services.assign_invoice_numbers`: prefix + `invoice_next_number` zero-padded to 4, under `select_for_update` of
-  the `BusinessDetails` row). Unknown or other users' ids are ignored.
+  gives `business` (only `shop_name`, the profile's: the sender) and the order details (no invoices). Unknown or
+  other users' ids are ignored.
 - **Shipments** (`ledger/api/shipments.py`): `Shipment` (1:1 order) is created by `services.record_shipment(order)`
   once the order is sent/arrived/done, called by `services.save_order` (extension reports) and
   `extension.mark_shipped`; later calls only fill blanks (seller edits stay) and set `delivered_at` the first time
@@ -181,8 +180,7 @@ There is no linter or formatter configured. Settings come only from the environm
   false ends the session with the browser; password reset by email (`templates/accounts/`, link to the SPA's
   `/login/reset/<uid>/<token>/`); `AuditEvent` (`record(user, kind, request)`: sign-in ok/failed on a known account,
   password changed/reset; `token_saved`/`token_removed` only on old rows; IP is `REMOTE_ADDR`) behind `GET /api/account/activity/`;
-  `BusinessDetails` (`business_of`; shop name and VAT stay on `Profile`) with the logo in the default storage
-  (`MEDIA_ROOT`, env `DJANGO_MEDIA_ROOT`, served by `config.views.media` under `/media/`; a compose volume).
+  uploads (purchase lot attachments) go to the default storage (`MEDIA_ROOT`, env `DJANGO_MEDIA_ROOT`, served by `config.views.media` under `/media/`; a compose volume).
   `me` adds `counts.copies`/`live_listings` (per `?game`), `markets` (Cardmarket and CardTrader with `handle`, from
   their MarketConnection, see Markets), `extension` and `prices_updated_at`; `GET /api/account/` is only
   `password_help`. Price guide expressions for items (`trend_price`,

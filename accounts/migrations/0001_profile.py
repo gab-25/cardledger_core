@@ -19,7 +19,6 @@ class Migration(migrations.Migration):
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('shop_name', models.CharField(blank=True, max_length=120)),
-                ('vat_number', models.CharField(blank=True, max_length=40, verbose_name='VAT number')),
                 ('user', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='profile', to=settings.AUTH_USER_MODEL)),
             ],
         ),

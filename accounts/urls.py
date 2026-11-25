@@ -14,8 +14,6 @@ urlpatterns = [
     path("api/account/", api.account, name="api_account"),
     path("api/account/profile/", api.profile, name="api_profile"),
     path("api/account/password/", api.password, name="api_password"),
-    path("api/account/business/", api.business, name="api_business"),
-    path("api/account/business/logo/", api.business_logo, name="api_business_logo"),
     path("api/account/settings/", api.seller_settings, name="api_settings"),
     path("api/account/activity/", api.activity, name="api_activity"),
 ]

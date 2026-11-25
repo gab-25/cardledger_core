@@ -1,16 +1,11 @@
 from django.contrib import admin
 
-from .models import AuditEvent, BusinessDetails, Profile, SellerSettings
+from .models import AuditEvent, Profile, SellerSettings
 
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
-    list_display = ["user", "shop_name", "vat_number"]
-
-
-@admin.register(BusinessDetails)
-class BusinessDetailsAdmin(admin.ModelAdmin):
-    list_display = ["user", "legal_name", "buyer_email"]
+    list_display = ["user", "shop_name"]
 
 
 @admin.register(SellerSettings)

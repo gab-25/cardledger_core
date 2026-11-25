@@ -60,25 +60,23 @@ class ProfileTest(TestCase):
         self.assertEqual(self.user.get_full_name(), "Gabriele S")
         self.assertEqual(self.user.email, "new@example.com")
 
-    def test_business_profile(self):
+    def test_shop_name(self):
         user = self.client.get(reverse("accounts:api_me")).json()["user"]
-        self.assertEqual((user["shop_name"], user["vat_number"]), ("", ""))
+        self.assertEqual(user["shop_name"], "")
+        self.assertNotIn("vat_number", user)
         self.assertFalse(Profile.objects.exists())  # created on demand, not by reading
-        resp = self.put("api_profile", {"email": "gab@example.com", "shop_name": "Gab Cards",
-                                        "vat_number": "IT01234567890"})
+        resp = self.put("api_profile", {"email": "gab@example.com", "shop_name": "Gab Cards"})
         self.assertEqual(resp.status_code, 200)
-        user = self.client.get(reverse("accounts:api_me")).json()["user"]
-        self.assertEqual((user["shop_name"], user["vat_number"]), ("Gab Cards", "IT01234567890"))
+        self.assertEqual(self.client.get(reverse("accounts:api_me")).json()["user"]["shop_name"], "Gab Cards")
         # left out: unchanged
         self.put("api_profile", {"first_name": "Gabriele", "email": "gab@example.com"})
-        profile = Profile.objects.get(user=self.user)
-        self.assertEqual((profile.shop_name, profile.vat_number), ("Gab Cards", "IT01234567890"))
+        self.assertEqual(Profile.objects.get(user=self.user).shop_name, "Gab Cards")
         self.assertEqual(Profile.objects.count(), 1)
 
-    def test_business_profile_errors_with_user_errors(self):
-        resp = self.put("api_profile", {"email": "OTHER@example.com", "vat_number": "X" * 41})
+    def test_shop_name_errors_with_user_errors(self):
+        resp = self.put("api_profile", {"email": "OTHER@example.com", "shop_name": "X" * 121})
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(set(resp.json()), {"email", "vat_number"})
+        self.assertEqual(set(resp.json()), {"email", "shop_name"})
         self.assertFalse(Profile.objects.exists())
 
     def test_email_must_be_unique(self):

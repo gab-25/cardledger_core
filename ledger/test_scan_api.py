@@ -823,7 +823,7 @@ class SchemaTest(LedgerTestCase):
         self.assertEqual(body("/api/listings/{item_pk}/", "put")["application/json"], listing)
         self.assertEqual(body("/api/sync/conflicts/{id}/resolve/", "post")["application/json"], {"keep"})
         self.assertEqual(body("/api/account/profile/", "put")["application/json"], {"first_name", "last_name", "email",
-                                                                         "shop_name", "vat_number"})
+                                                                         "shop_name"})
         self.assertEqual(body("/api/collection/bulk/", "post")["application/json"], {"ids", "action", "location", "pct",
                                                                                      "markets"})
         self.assertEqual(body("/api/account/password/", "post")["application/json"],

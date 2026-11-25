@@ -1,5 +1,5 @@
-"""Orders pick/pack/ship and Shipments: stages, deadlines, tabs, picking, packing, issues, pick lists, packing slips
-with invoice numbers, shipments (statuses, KPIs, tabs, edits) and the sidebar counters."""
+"""Orders pick/pack/ship and Shipments: stages, deadlines, tabs, picking, packing, issues, pick lists, packing slips,
+shipments (statuses, KPIs, tabs, edits) and the sidebar counters."""
 
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -12,7 +12,7 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import Client, TransactionTestCase
 from django.urls import reverse
 
-from accounts.models import BusinessDetails
+from accounts.models import Profile
 from . import services, shipping
 from .models import Card, CollectionItem, Listing, Order, OrderItem, Shipment
 from .tests import LedgerTestCase, game
@@ -174,8 +174,7 @@ class OrdersListTest(FlowTestCase):
         second = self.order(paid_at=at(17))
         data = self.get("api_order", first.pk)
         self.assertEqual(data["next_id"], second.pk)
-        for key in ("stage", "due", "due_by", "picked_count", "items_count", "packed_at", "issue_note",
-                    "invoice_number"):
+        for key in ("stage", "due", "due_by", "picked_count", "items_count", "packed_at", "issue_note"):
             self.assertIn(key, data)
         self.assertFalse(data["items"][0]["picked"])
         self.assertEqual(self.get("api_order", second.pk)["next_id"], first.pk)  # last: back to the first
@@ -237,8 +236,6 @@ class PickPackTest(FlowTestCase):
         self.assertEqual(self.call("patch", "api_order_item", theirs.pk, line.pk, picked=True).status_code, 404)
         self.assertEqual(self.get("api_orders_pick_list", ids=f"{mine.pk}")["orders"], [])
         self.assertEqual(self.get("api_orders_slips", ids=f"{mine.pk}")["orders"], [])
-        mine.refresh_from_db()
-        self.assertEqual(mine.invoice_number, "")
 
 
 class PickListTest(FlowTestCase):
@@ -265,27 +262,18 @@ class PickListTest(FlowTestCase):
 
 
 class SlipsTest(FlowTestCase):
-    def test_invoice_numbers(self):
-        BusinessDetails.objects.create(user=self.other, legal_name="Gab SRL", invoice_prefix="CL-",
-                                       invoice_next_number=41)
-        numbered = self.order(invoice_number="CL-0007")
+    def test_sender_is_the_shop_name(self):
+        Profile.objects.create(user=self.other, shop_name="Gab Cards")
         a, b = self.order(), self.order()
-        data = self.get("api_orders_slips", ids=f"{b.pk},{numbered.pk},{a.pk}")
-        self.assertEqual(data["business"]["legal_name"], "Gab SRL")
-        self.assertIn("logo_url", data["business"])
-        self.assertEqual([(o["id"], o["invoice_number"]) for o in data["orders"]],
-                         [(b.pk, "CL-0041"), (numbered.pk, "CL-0007"), (a.pk, "CL-0042")])
+        data = self.get("api_orders_slips", ids=f"{b.pk},{a.pk}")
+        self.assertEqual(data["business"], {"shop_name": "Gab Cards"})
+        self.assertEqual([o["id"] for o in data["orders"]], [b.pk, a.pk])
         self.assertIn("items", data["orders"][0])
-        self.assertEqual(BusinessDetails.objects.get(user=self.other).invoice_next_number, 43)
-        # printed again: same numbers
-        again = self.get("api_orders_slips", ids=f"{a.pk},{b.pk}")
-        self.assertEqual([o["invoice_number"] for o in again["orders"]], ["CL-0042", "CL-0041"])
-        self.assertEqual(BusinessDetails.objects.get(user=self.other).invoice_next_number, 43)
+        self.assertNotIn("invoice_number", data["orders"][0])
 
-    def test_without_business_details(self):
+    def test_without_profile(self):
         order = self.order()
-        self.assertEqual(self.get("api_orders_slips", ids=str(order.pk))["orders"][0]["invoice_number"], "0001")
-        self.assertEqual(BusinessDetails.objects.get(user=self.other).invoice_next_number, 2)
+        self.assertEqual(self.get("api_orders_slips", ids=str(order.pk))["business"], {"shop_name": ""})
 
 
 class ShipmentCreationTest(FlowTestCase):

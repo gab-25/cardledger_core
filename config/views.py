@@ -22,7 +22,7 @@ def ui_app(request):
 
 
 def media(request, path):
-    """An uploaded file (the business logo) from the default storage; the names are random, the files public."""
+    """An uploaded file (a purchase lot attachment) from the default storage; the names are random, the files public."""
     if ".." in path.split("/") or not default_storage.exists(path):
         raise Http404()
     content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"

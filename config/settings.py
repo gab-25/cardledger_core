@@ -155,7 +155,7 @@ if UI_APP_DIR.is_dir():
     STATICFILES_DIRS = [('ui', UI_APP_DIR)]
 
 
-# Uploaded files (the business logo), served by config.views.media under /media/. In Docker, mount a volume here.
+# Uploaded files (purchase lot attachments), served by config.views.media under /media/. In Docker, mount a volume here.
 MEDIA_ROOT = Path(os.environ.get('DJANGO_MEDIA_ROOT') or BASE_DIR / 'media').resolve()
 MEDIA_URL = '/media/'
 

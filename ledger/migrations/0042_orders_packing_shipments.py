@@ -13,11 +13,6 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddField(
             model_name='order',
-            name='invoice_number',
-            field=models.CharField(blank=True, help_text='Given when its packing slip is printed', max_length=40),
-        ),
-        migrations.AddField(
-            model_name='order',
             name='issue_at',
             field=models.DateTimeField(blank=True, null=True),
         ),
