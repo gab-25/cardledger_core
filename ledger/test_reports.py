@@ -60,47 +60,47 @@ class ReportsTest(DealerTestCase):
         return resp.json()
 
     def test_kpis_and_range(self):
-        data = self.report()
+        data = self.report()  # Magic by default: the cm order (the ct one is Pokémon)
         today = timezone.localdate()
         self.assertEqual(data["range"], {"from": str(today - timedelta(days=29)), "to": str(today),
                                          "prev_from": str(today - timedelta(days=59)),
                                          "prev_to": str(today - timedelta(days=30))})
-        self.assertEqual(data["kpis"], {"net_sales": "75.00", "net_sales_prev": "20.00", "gross_profit": "16.00",
-                                        "profit_coverage_pct": "48.0", "orders": 2, "avg_basket": "37.50",
-                                        "fees": "8.00", "postage": "3.00"})
-        self.assertEqual(sum(Decimal(w["net_sales"]) for w in data["weeks"]), Decimal("75.00"))
+        self.assertEqual(data["kpis"], {"net_sales": "45.00", "net_sales_prev": "20.00", "gross_profit": "16.00",
+                                        "profit_coverage_pct": "80.0", "orders": 1, "avg_basket": "45.00",
+                                        "fees": "5.00", "postage": "3.00"})
+        self.assertEqual(sum(Decimal(w["net_sales"]) for w in data["weeks"]), Decimal("45.00"))
         monday = today - timedelta(days=today.weekday())
         self.assertEqual(data["weeks"][-1]["week_start"], monday.isoformat())
 
     def test_breakdowns(self):
         data = self.report()
         self.assertEqual(data["by_market"], [
-            {"market": "cm", "share_pct": "60.0", "net_sales": "45.00", "orders": 1, "fees": "5.00",
+            {"market": "cm", "share_pct": "100.0", "net_sales": "45.00", "orders": 1, "fees": "5.00",
              "margin_pct": "44.4"},
-            {"market": "ct", "share_pct": "40.0", "net_sales": "30.00", "orders": 1, "fees": "3.00",
+            {"market": "ct", "share_pct": "0.0", "net_sales": "0.00", "orders": 0, "fees": "0.00",
              "margin_pct": None},
         ])
         sets = data["by_set"]
         self.assertEqual([(s["name"], s["game"], s["units"], s["net_sales"]) for s in sets],
-                         [("Dominaria United", "mtg", 2, "36.00"), ("Scarlet & Violet", "pokemon", 1, "30.00"),
-                          ("Dominaria Remastered", "mtg", 1, "9.00")])
+                         [("Dominaria United", "mtg", 2, "36.00"), ("Dominaria Remastered", "mtg", 1, "9.00")])
         self.assertEqual((sets[0]["profit"], sets[0]["margin_pct"], sets[0]["days_to_sell"]), ("16.00", "44.4", 8.0))
-        self.assertEqual((sets[1]["profit"], sets[1]["margin_pct"], sets[1]["days_to_sell"]), (None, None, None))
-        self.assertEqual(data["by_country"], [{"code": "DE", "orders": 1, "share_pct": "50.0"},
-                                              {"code": "IT", "orders": 1, "share_pct": "50.0"}])
+        pokemon = self.report(game="pokemon")["by_set"]
+        self.assertEqual([(s["name"], s["profit"], s["margin_pct"], s["days_to_sell"]) for s in pokemon],
+                         [("Scarlet & Violet", None, None, None)])
+        self.assertEqual(data["by_country"], [{"code": "IT", "orders": 1, "share_pct": "100.0"}])
 
     def test_filters(self):
-        self.assertEqual(self.report(market="ct")["kpis"]["net_sales"], "30.00")
+        self.assertEqual(self.report(market="ct")["kpis"]["net_sales"], "0.00")  # Magic: only on cm
+        self.assertEqual(self.report(market="ct", game="pokemon")["kpis"]["net_sales"], "30.00")
         mtg = self.report(game="mtg")
         self.assertEqual((mtg["kpis"]["net_sales"], mtg["kpis"]["orders"], mtg["kpis"]["net_sales_prev"]),
                          ("45.00", 1, "20.00"))
         self.assertEqual(self.report(game="pokemon")["kpis"]["net_sales"], "30.00")
-        self.assertEqual(self.report(game="all")["kpis"]["net_sales"], "75.00")
         today = timezone.localdate()
         narrow = self.report(**{"from": str(today - timedelta(days=3)), "to": str(today)})
         self.assertEqual((narrow["kpis"]["net_sales"], narrow["range"]["prev_to"], narrow["range"]["prev_from"]),
                          ("45.00", str(today - timedelta(days=4)), str(today - timedelta(days=7))))
-        self.assertEqual(narrow["kpis"]["net_sales_prev"], "30.00")
+        self.assertEqual(narrow["kpis"]["net_sales_prev"], "0.00")  # the earlier order is Pokémon
 
     def test_game_share_of_a_mixed_order(self):
         mixed = self.order("ct", timezone.now() - timedelta(days=1), total="40.00", net="40.00", fee="4.00")
@@ -116,7 +116,7 @@ class ReportsTest(DealerTestCase):
     def test_validation(self):
         url = reverse("ledger:api_reports")
         for params in ({"from": "2026-12-01", "to": "2026-11-01"}, {"from": "tomorrow"}, {"market": "ebay"},
-                       {"game": "chess"}):
+                       {"game": "chess"}, {"game": "all"}):
             with self.subTest(params=params):
                 self.assertEqual(self.client.get(url, params).status_code, 400)
 

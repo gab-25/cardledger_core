@@ -8,7 +8,7 @@ orders left out):
   price). Gross profit = Σ (line net − cost × quantity) over the lines whose collection item has a cost (null when
   none has); profit_coverage_pct = the share of the net sales coming from those lines; margin_pct = gross profit /
   net of those lines.
-- With ?game, an order counts when one of its lines is of that game (line → listing → item → card's game); its net,
+- The report is of one game (?game, default Magic): an order counts when one of its lines is of that game (line → listing → item → card's game); its net,
   fee and postage count for the share of its value in that game's lines, and the other lines are left out.
 - avg_basket = net sales / orders; postage = Σ the shipments' postage cost of the orders counted.
 - days_to_sell (by set) = the average days from the listing's listed_at to the order's payment, one decimal (a
@@ -26,7 +26,7 @@ from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from ..models import Expansion, Game, Market, Order, Shipment
+from ..models import MAGIC, Expansion, Game, Market, Order, Shipment
 from .common import doc, query
 
 TAGS = ["reports"]
@@ -38,7 +38,7 @@ CSV_COLUMNS = ["name", "code", "game", "units", "net_sales", "profit", "margin_p
 PARAMS = [
     query("from", "First day, YYYY-MM-DD (default 29 days before to)"),
     query("to", "Last day, YYYY-MM-DD (default today)"),
-    query("game", "Slug of a game, or all (default): orders with a line of that game, its lines only"),
+    query("game", f"Slug of the game (default {MAGIC}; never all of them): orders with a line of that game, its lines only"),
     query("market", "cm or ct; empty: every market", enum=["cm", "ct", ""]),
 ]
 
@@ -62,18 +62,16 @@ def _date(params, name, default):
 
 
 def parse_filters(params):
-    """(from, to, game or None, market or "") of the query, validated."""
+    """(from, to, game, market or "") of the query, validated: one game, Magic by default (all of them is refused)."""
     to = _date(params, "to", timezone.localdate())
     start = _date(params, "from", to - timedelta(days=DEFAULT_DAYS - 1))
     if start > to:
         raise ValidationError({"from": ["The first day is after the last."]})
-    slug = params.get("game", "").strip()
-    game = None
-    if slug and slug != "all":
-        try:
-            game = Game.by_slug(slug)
-        except Game.DoesNotExist:
-            raise ValidationError({"game": [f"Unknown game '{slug}'."]}) from None
+    slug = params.get("game", "").strip() or MAGIC
+    try:
+        game = Game.by_slug(slug)
+    except Game.DoesNotExist:
+        raise ValidationError({"game": [f"Unknown game '{slug}'."]}) from None
     market = params.get("market", "").strip()
     if market and market not in Market.values:
         raise ValidationError({"market": ["cm, ct or empty."]})
@@ -125,9 +123,9 @@ class Counted:
             return values[i] / whole if whole else Decimal(1) / len(items)
 
         keep = [i for i, it in enumerate(items)
-                if game is None or (it.listing is not None and it.listing.item.card.game_id == game.pk)]
-        self.counted = bool(keep) if game is not None else True
-        share = sum((share_of(i) for i in keep), ZERO) if game is not None else Decimal(1)
+                if it.listing is not None and it.listing.item.card.game_id == game.pk]
+        self.counted = bool(keep)
+        share = sum((share_of(i) for i in keep), ZERO)
         self.order = order
         self.net = net * share
         self.fee = (order.market_fee or ZERO) * share
@@ -252,7 +250,7 @@ def report(user, start, to, game, market):
     }
 
 
-@doc(TAGS, "Sales report of a date range (default the last 30 days, every game and market): KPIs with the previous "
+@doc(TAGS, "Sales report of one game over a date range (default Magic, the last 30 days, every market): KPIs with the previous "
            "period of the same length, Monday-start weeks, markets, the top 50 sets by net sales and the buyers' "
            "countries. See ledger/api/reports.py for how net, profit and the game filter are counted",
      parameters=PARAMS)

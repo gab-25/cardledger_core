@@ -219,7 +219,8 @@ There is no linter or formatter configured. Settings come only from the environm
   clears); scan session create and `PATCH sessions/<uuid>/` take `lot`. `me.counts.lots_to_process`.
 - **Reports** (`ledger/api/reports.py`, `/api/reports/?from&to&game&market`, `sets.csv`): computed in Python from the
   orders paid in the range (canceled/merged out); rules in the module docstring (net = net or total − fee, line net
-  shared by line value, profit over lines whose item has a cost, game filter shares an order by its lines' value,
+  shared by line value, profit over lines whose item has a cost, always one game (default mtg, `all` refused) whose
+  share of an order is its lines' value,
   postage = the counted orders' shipments, days_to_sell a number).
 - **History** (`ledger/snapshots.py`): `PriceSnapshot(cm_product_id, date, trend, trend_foil)` written by the catalog
   sync per game after its prices (raw SQL: only products whose trends changed since their latest snapshot, dated the
