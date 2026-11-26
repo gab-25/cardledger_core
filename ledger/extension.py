@@ -125,8 +125,16 @@ def _item(item):
     }
 
 
+def plan_games(user, market):
+    """Slugs of the games the user has listings of on market (any status): the extension reads the market's stock and
+    orders of these (Cardmarket's seller pages are per game)."""
+    return sorted(set(Listing.objects.owned_by(user).filter(market=market)
+                      .values_list("item__card__game__slug", flat=True)))
+
+
 def plan(user, market):
-    """{market, changes: [...]}: every listing of the user's to create, update or delete on market."""
+    """{market, games, changes: [...]}: every listing of the user's to create, update or delete on market, and the
+    games whose stock and orders the extension must read there."""
     changes = []
     for listing in _candidates(user, market):
         action = action_of(listing)
@@ -137,7 +145,7 @@ def plan(user, market):
             "item": _item(listing.item), "quantity": listing.quantity, "price": f"{listing.price:.2f}",
             "comment": "",
         })
-    return {"market": market, "changes": changes}
+    return {"market": market, "games": plan_games(user, market), "changes": changes}
 
 
 def pending_counts(user):

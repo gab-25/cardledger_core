@@ -102,7 +102,7 @@ There is no linter or formatter configured. Settings come only from the environm
   shown once, and both markets' connections turned on; `ExtensionToken` keeps only its sha256; `tokens/` list and
   revoke). The other endpoints accept only `Authorization: Token <token>` (`ExtensionTokenAuthentication`, used
   nowhere else): `status/`, `plan/?market=` (`action_of`: create/update for to_publish|error, delete for paused or pending_delete rows on the
-  market), `report/` (`apply_report`, idempotent per `ExtensionRun.run_id`: results, orders, stock reconciliation
+  market; `games`: the slugs the user has listings of there, whose stock and orders the extension reads), `report/` (`apply_report`, idempotent per `ExtensionRun.run_id`: results, orders, stock reconciliation
   with `unmatched` rows, CardTrader blueprints, connection, SyncLog), `shipped/` (any market: tracking code, paid or
   hub_pending → sent). `GET /api/sync/` `connections` are the two markets (`market_states` + `orders_synced_at`,
   `open_conflicts`); `GET /api/orders/` `orders_synced_at` comes from the connections. `me` adds

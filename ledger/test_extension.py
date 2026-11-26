@@ -11,7 +11,7 @@ from django.utils import timezone
 from . import extension
 from .models import (Card, CollectionItem, ExtensionPairing, ExtensionToken, Listing, MarketConnection, Order, SyncConflict,
                      SyncLog)
-from .tests import LedgerTestCase
+from .tests import LedgerTestCase, game
 
 
 class ExtensionTestCase(LedgerTestCase):
@@ -157,6 +157,21 @@ class PlanTest(ExtensionTestCase):
         actions = {c["listing_id"]: c["action"] for c in self.plan("cm")["changes"]}
         self.assertEqual(actions, {create.pk: "create", update.pk: "update", paused.pk: "delete",
                                    removed.pk: "delete"})
+
+    def test_plan_names_the_games_to_read(self):
+        """The extension reads the market's stock and orders of these games (Cardmarket's pages are per game):
+        every game the user has a listing of on the market, whatever its status."""
+        self.assertEqual(self.plan("ct")["games"], ["mtg"])
+        self.cm_listing("Ragavan, Nimble Pilferer", market_listing_id="A4", status="published")  # nothing to push
+        pikachu = Card.objects.create(game=game("pokemon"), name="Pikachu", set_code="SV1", collector_number="025")
+        item = CollectionItem.objects.create(owner=self.user, card=pikachu, condition="NM", language="EN", quantity=1)
+        Listing.objects.create(item=item, market="cm", price=Decimal("2.00"), quantity=0, status="sold")
+        cm = self.plan("cm")
+        self.assertEqual(cm["changes"], [])
+        self.assertEqual(cm["games"], ["mtg", "pokemon"])
+        self.client.force_login(self.other)
+        other = Client(HTTP_AUTHORIZATION=f"Token {self.pair_and_claim()}")
+        self.assertEqual(self.plan("cm", client=other)["games"], [])
 
     def test_other_users_listings_are_not_planned(self):
         self.client.force_login(self.other)
