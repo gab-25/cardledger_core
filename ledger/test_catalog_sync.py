@@ -569,6 +569,20 @@ class RunSyncTest(CatalogSyncTestCase):
         self.assertTrue(reports["Disney Lorcana"][1])
         self.assertIn("No catalog file", reports["Disney Lorcana"][0])
 
+    def test_each_game_is_reported_before_the_next_one_syncs(self):
+        events = []
+        real = catalog_sync._sync_game
+
+        def sync_game(bucket, cm_client, game, problem=""):
+            events.append(("sync", game.name))
+            return real(bucket, cm_client, game, problem)
+
+        self.report = lambda message, warning: events.append(("report", message.split(" catalog")[0]))
+        with mock.patch.object(catalog_sync, "_sync_game", side_effect=sync_game):
+            self.run_sync()
+        names = Game.objects.order_by("slug").values_list("name", flat=True)
+        self.assertEqual(events, [event for name in names for event in (("sync", name), ("report", name))])
+
     def test_default_report_is_the_python_log(self):
         with self.assertLogs("ledger.catalog_sync", "INFO") as logs:
             catalog_sync.run_sync(self.bucket(), self.cm.client())

@@ -11,7 +11,9 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         def report(message, warning):
-            (self.stderr if warning else self.stdout).write(message)
+            stream = self.stderr if warning else self.stdout
+            stream.write(message)
+            stream.flush()  # each game shows up as soon as it is done, even when the output is not a terminal
 
         try:
             results = catalog_sync.run_sync(report=report)
