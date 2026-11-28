@@ -1,13 +1,8 @@
-from unittest import mock
-
-import httpx
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from ledger import services
-from ledger.cardtrader import CardTraderClient
-from ledger.models import SyncLog
+from .models import Profile
 
 
 class ProfileTest(TestCase):
@@ -31,7 +26,14 @@ class ProfileTest(TestCase):
         self.assertEqual(data["user"]["username"], "gab")
         self.assertEqual(data["user"]["full_name"], "")
         self.assertFalse(data["user"]["is_staff"])
-        self.assertEqual(data["counts"], {"pending_changes": 0, "orders_to_ship": 0})
+        self.assertEqual(data["counts"], {"pending_changes": 0, "orders_to_ship": 0, "copies": 0, "live_listings": 0,
+                                          "orders_to_pack": 0, "shipment_problems": 0, "rules_on": 0, "rules_total": 0, "lots_to_process": 0})
+        self.assertEqual(data["markets"], [
+            {"code": "cm", "name": "Cardmarket", "connected": False, "status": "off", "last_sync": None, "handle": ""},
+            {"code": "ct", "name": "CardTrader", "connected": False, "status": "off", "last_sync": None, "handle": ""},
+        ])
+        self.assertEqual(data["extension"], {"paired": False, "last_seen_at": None})
+        self.assertIsNone(data["prices_updated_at"])
 
     def test_pending_changes_per_game(self):
         from ledger.models import Listing
@@ -45,11 +47,9 @@ class ProfileTest(TestCase):
         self.assertEqual(self.client.get(url, {"game": ""}).json()["counts"]["pending_changes"], 1)
         self.assertEqual(self.client.get(url, {"game": "chess"}).status_code, 400)
 
-    def test_account_reports_cardtrader_not_connected(self):
+    def test_account_has_only_the_password_rules(self):
         data = self.client.get(reverse("accounts:api_account")).json()
-        self.assertEqual(data["cardtrader"]["name"], "CardTrader")
-        self.assertFalse(data["cardtrader"]["token_saved"])
-        self.assertNotIn("shares_token", data)
+        self.assertEqual(set(data), {"password_help"})
         self.assertIn("Your password must contain at least 8 characters.", data["password_help"])
 
     def test_update_details(self):
@@ -59,6 +59,25 @@ class ProfileTest(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.get_full_name(), "Gabriele S")
         self.assertEqual(self.user.email, "new@example.com")
+
+    def test_shop_name(self):
+        user = self.client.get(reverse("accounts:api_me")).json()["user"]
+        self.assertEqual(user["shop_name"], "")
+        self.assertNotIn("vat_number", user)
+        self.assertFalse(Profile.objects.exists())  # created on demand, not by reading
+        resp = self.put("api_profile", {"email": "gab@example.com", "shop_name": "Gab Cards"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.client.get(reverse("accounts:api_me")).json()["user"]["shop_name"], "Gab Cards")
+        # left out: unchanged
+        self.put("api_profile", {"first_name": "Gabriele", "email": "gab@example.com"})
+        self.assertEqual(Profile.objects.get(user=self.user).shop_name, "Gab Cards")
+        self.assertEqual(Profile.objects.count(), 1)
+
+    def test_shop_name_errors_with_user_errors(self):
+        resp = self.put("api_profile", {"email": "OTHER@example.com", "shop_name": "X" * 121})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(set(resp.json()), {"email", "shop_name"})
+        self.assertFalse(Profile.objects.exists())
 
     def test_email_must_be_unique(self):
         resp = self.put("api_profile", {"email": "OTHER@example.com"})
@@ -127,118 +146,25 @@ class LoginTest(TestCase):
         schema = resp.json()
         body = schema["paths"]["/api/auth/login/"]["post"]["requestBody"]["content"]["application/json"]["schema"]
         login = schema["components"]["schemas"][body["$ref"].rsplit("/", 1)[1]]
-        self.assertEqual(set(login["properties"]), {"username", "password"})
+        self.assertEqual(set(login["properties"]), {"username", "password", "remember"})
         self.assertEqual(set(login["required"]), {"username", "password"})
 
 
-CT_ACCOUNTS = {"good-token": 7, "other-good": 8}
+class NoCardTraderTokenTest(TestCase):
+    """CardTrader is synced by the browser extension: no token is stored or asked for anywhere."""
 
-
-def fake_client(token):
-    def handler(request):
-        token = request.headers["Authorization"].removeprefix("Bearer ")
-        for prefix, user_id in CT_ACCOUNTS.items():
-            if token.startswith(prefix):
-                return httpx.Response(200, json={"id": 1, "name": "My shop", "user_id": user_id})
-        return httpx.Response(401, json={"error_code": "unauthorized", "extra": {"message": "bad token"}})
-    return CardTraderClient(token, transport=httpx.MockTransport(handler))
-
-
-@mock.patch.object(services, "make_client", side_effect=fake_client)
-class CardTraderTokenTest(TestCase):
     def setUp(self):
-        User = get_user_model()
-        self.user = User.objects.create_user("gab", password="pw")
-        self.friend = User.objects.create_user("ami", password="pw")
+        self.user = get_user_model().objects.create_user("gab", password="pw")
         self.client.force_login(self.user)
-        self.url = reverse("accounts:api_token")
 
-    def connect(self, token, user=None):
-        if user is not None:
-            self.client.force_login(user)
-        return self.client.put(self.url, {"token": token}, content_type="application/json")
+    def test_token_endpoint_is_gone(self):
+        for method in ("get", "put", "delete"):
+            with self.subTest(method=method):
+                resp = getattr(self.client, method)("/api/account/cardtrader-token/", {"token": "t"},
+                                                    content_type="application/json")
+                self.assertEqual(resp.status_code, 404)
 
-    def account(self):
-        return self.client.get(reverse("accounts:api_account")).json()
+    def test_cardtrader_is_off_until_the_extension_is_paired(self):
+        ct = self.client.get(reverse("accounts:api_me")).json()["markets"][1]
+        self.assertEqual((ct["code"], ct["status"], ct["connected"]), ("ct", "off", False))
 
-    def test_valid_token_is_saved_on_own_account(self, _):
-        resp = self.connect("  good-token ")
-        self.assertEqual(resp.json()["messages"], [{"level": "success", "text": "CardTrader connected (app “My shop”)."}])
-        mine = services.get_cardtrader(self.user)
-        self.assertEqual((mine.api_token, mine.ct_user_id), ("good-token", 7))
-        self.assertEqual(services.get_cardtrader(self.friend).api_token, "")
-        account = self.account()
-        self.assertTrue(account["cardtrader"]["token_saved"])
-        self.assertNotIn("good-token", str(account))  # never sent back
-        self.assertTrue(SyncLog.objects.filter(owner=self.user, message__contains="API token connected").exists())
-
-    def test_long_jwt_token_is_saved(self, _):
-        token = "good-token." + "x" * 1200  # CardTrader tokens are JWTs, longer than 500 characters
-        self.assertEqual(self.connect(token).status_code, 200)
-        self.assertEqual(services.get_cardtrader(self.user).api_token, token)
-
-    def test_rejected_token_is_not_saved(self, _):
-        resp = self.connect("bad-token")
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("CardTrader rejected this token", resp.json()["token"][0])
-        self.assertEqual(services.get_cardtrader(self.user).api_token, "")
-
-    def test_same_cardtrader_account_rejected_for_second_user(self, _):
-        self.connect("good-token")
-        resp = self.connect("good-token-2", user=self.friend)
-        self.assertIn("already connected to another user", resp.json()["token"][0])
-        self.assertEqual(services.get_cardtrader(self.friend).api_token, "")
-        self.assertEqual(services.get_cardtrader(self.user).api_token, "good-token")
-
-    def test_migrated_token_without_user_id_still_blocks_duplicates(self, _):
-        mine = services.get_cardtrader(self.user)
-        mine.api_token = "good-token"  # copied by the migration: its CardTrader user is not known yet
-        mine.save()
-        resp = self.connect("good-token-2", user=self.friend)
-        self.assertIn("already connected to another user", resp.json()["token"][0])
-        mine.refresh_from_db()
-        self.assertEqual(mine.ct_user_id, 7)
-
-    def test_reconnecting_own_account_is_allowed(self, _):
-        self.connect("good-token")
-        self.assertEqual(self.connect("good-token-new").status_code, 200)
-        self.assertEqual(services.get_cardtrader(self.user).api_token, "good-token-new")
-
-    def test_another_account_for_the_friend_is_fine(self, _):
-        self.connect("good-token")
-        self.connect("other-good", user=self.friend)
-        self.assertEqual(services.get_cardtrader(self.friend).ct_user_id, 8)
-
-    def test_remove_token(self, _):
-        self.connect("good-token")
-        self.connect("other-good", user=self.friend)
-        resp = self.client.delete(self.url)
-        self.assertEqual(resp.json()["messages"][0]["text"], "CardTrader token removed.")
-        friend = services.get_cardtrader(self.friend)
-        self.assertEqual((friend.api_token, friend.ct_user_id), ("", None))
-        self.assertEqual(services.get_cardtrader(self.user).api_token, "good-token")
-        self.assertFalse(self.account()["cardtrader"]["token_saved"])
-
-    def test_get_returns_own_token_only(self, _):
-        self.connect("good-token")
-        self.connect("other-good", user=self.friend)
-        self.assertEqual(self.client.get(self.url).json(), {"token": "other-good"})
-        self.client.force_login(self.user)
-        self.assertEqual(self.client.get(self.url).json(), {"token": "good-token"})
-
-    def test_get_without_token_is_404(self, _):
-        resp = self.client.get(self.url)
-        self.assertEqual(resp.status_code, 404)
-
-    def test_get_requires_login(self, _):
-        self.client.logout()
-        self.assertIn(self.client.get(self.url).status_code, (401, 403))
-
-    def test_admin_token_is_not_shared(self, _):
-        admin = get_user_model().objects.create_superuser("boss", password="pw")
-        self.connect("good-token", user=admin)
-        self.assertNotIn("shares_token", self.account())
-
-    def test_environment_token_is_not_used(self, _):
-        with mock.patch.dict("os.environ", {"CARDTRADER_API_TOKEN": "env-token"}):
-            self.assertFalse(self.account()["cardtrader"]["token_saved"])

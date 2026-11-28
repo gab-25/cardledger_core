@@ -155,6 +155,11 @@ if UI_APP_DIR.is_dir():
     STATICFILES_DIRS = [('ui', UI_APP_DIR)]
 
 
+# Uploaded files (purchase lot attachments), served by config.views.media under /media/. In Docker, mount a volume here.
+MEDIA_ROOT = Path(os.environ.get('DJANGO_MEDIA_ROOT') or BASE_DIR / 'media').resolve()
+MEDIA_URL = '/media/'
+
+
 # REST API (/api/): the Django session authenticates, CSRF as for forms (X-CSRFToken header), JSON only.
 # Errors are DRF's: {"field": ["..."]} for validation, else {"detail", "code", "help_url"?} (ledger.api.errors).
 
@@ -180,8 +185,10 @@ SPECTACULAR_SETTINGS = {
     'COMPONENT_SPLIT_REQUEST': True,
     'ENUM_NAME_OVERRIDES': {
         'ConditionEnum': 'ledger.models.Condition',
+        'MarketEnum': 'ledger.models.Market',
         'LanguageEnum': 'ledger.models.Language',
         'ScanSessionStatusEnum': 'ledger.models.ScanSession.Status',
+        'RuleMarketsEnum': 'ledger.models.RepricingRule.Markets',
     },
     'SWAGGER_UI_DIST': 'SIDECAR',
     'SWAGGER_UI_FAVICON_HREF': 'SIDECAR',

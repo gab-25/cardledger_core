@@ -43,7 +43,7 @@ COPY --from=ui /ui/dist /app/ui/dist
 
 RUN python manage.py collectstatic --noinput
 
-RUN useradd --system --create-home --uid 1000 app
+RUN useradd --system --create-home --uid 1000 app && mkdir -p /app/media && chown app /app/media
 USER app
 EXPOSE 8000
 

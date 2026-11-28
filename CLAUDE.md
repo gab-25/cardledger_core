@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 CardLedger server: a Django 6 + Django REST Framework app (Python 3.14, managed with `uv`) that holds a trading card
-collection (Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages CardTrader sales. It exposes
+collection (Magic, Pokémon, Lorcana, One Piece, Yu-Gi-Oh! and Riftbound) and manages sales on Cardmarket and CardTrader (synced only by a browser extension: no market token on the server). It exposes
 only a JSON API under `/api/`; the interface is a
 separate React SPA ([cardledger_ui](https://github.com/gab-25/cardledger_ui)), included as the git submodule `ui/`
 (pinned to a release tag; the Dockerfile builds it in a Node stage), whose built `index.html` Django serves for every
@@ -32,36 +32,38 @@ uv run python manage.py spectacular --validate --fail-on-warn --file /dev/null  
 docker compose up -d redis && uv run celery -A config worker --loglevel=info     # catalog sync worker
 uv run python manage.py sync_catalog             # run the nightly catalog + price sync in-process (right after
                                                  # the first migrate: the catalog starts empty)
+uv run python manage.py snapshot_stock_values    # today's stock value per user and game (schedule daily, e.g. cron
+                                                 # after sync_catalog, which also runs it)
 ```
 
 There is no linter or formatter configured. Settings come only from the environment / `.env` (see `.env.example`).
 
 ## Architecture
 
-- **Apps**: `config/` (settings, root URLs, the UI view), `accounts/` (auth and profile API in `accounts/api.py`),
+- **Apps**: `config/` (settings, root URLs, the UI view), `accounts/` (auth and profile API in `accounts/api.py`;
+  `accounts.Profile`, one-to-one with the user and created on demand by `profile_of`, holds the shop name
+  `shop_name` (single user: no business details, VAT, invoices or team), shown in `me`'s `user` and saved by `PUT /api/account/profile/`),
   `ledger/` (the domain). Views in `ledger/api/*.py` and `accounts/api.py` are function-based DRF `@api_view`s, one
-  module per UI page; business logic lives in `ledger/services.py` (CardTrader sync, publish, orders, CSV) and
-  `ledger/scan.py`, not in the views.
+  module per UI page; business logic lives in `ledger/services.py` (CSV, market connections, orders, shared stock,
+  conflicts), `ledger/extension.py` and `ledger/scan.py`, not in the views.
 - **Multi-user ownership**: every personal row (collection items, listings, orders, scan sessions, conflicts, logs)
   has an owner, reached through `owned_manager(path)` / `OwnedQuerySet.owned_by(user)` in `ledger/models.py`. Views
   must always start from `Model.objects.owned_by(request.user)` so another user's object answers 404
   (`ledger/test_ownership.py`). `SyncLog.objects.visible_to(user)` adds the global entries. The card catalog
   (`Expansion`, `Blueprint`) and prices are shared.
-- **CardTrader tokens**: each user has their own token on a `SyncService` row (`services.get_cardtrader(user)`);
-  `services.user_client(user)` never falls back to another user's token, and nothing uses a shared or admin token:
-  CardTrader is only reached to sell (publish, orders, shipments). All clients are built by `services.make_client`,
-  which tests patch.
+- **No market tokens**: the server stores no Cardmarket or CardTrader credential and never calls either market (no
+  CardTrader client; `SyncService` and its tokens were dropped by migration 0041). Both markets are synced only by the
+  browser extension (see Markets).
 - **Cards vs printings**: `Card` is the Ledger's own row (name + set + collector number) that `CollectionItem`
   points to, tied to its printing by `Card.cm_product_id`; `Blueprint` is a product of the local catalog, keyed by
   its Cardmarket product id (`cm_product`, also the row of its Cardmarket price). **Games**: `Game` (mtg, pokemon,
   lorcana, onepiece, yugioh, riftbound); `Expansion`, `Category` and `Card` belong to a game, uniqueness is per game,
   and every catalog lookup (recognition, reconcile, resolve_blueprints, API) stays inside one game. Collection, import,
   export, listings, catalog and scan setup take `?game=<slug>` through `game_param(params)` / `GAME` in
-  `ledger/api/common.py` (default `mtg`, unknown slug 400); `GET /api/scan/sessions/`, `POST /api/listings/publish/` and `me`'s
+  `ledger/api/common.py` (default `mtg`, unknown slug 400); `GET /api/scan/sessions/` and `me`'s
   `pending_changes` without `game` (absent or blank) cover every game; item and listing detail (`collection/<pk>/`, `listings/<pk>/`) return their `game`;
-  `GET /api/games/` lists the games. Orders, shipments, sync and `orders_to_ship` stay global. The catalog is rebuilt
-  only by the nightly `ledger/catalog_sync.py`, with no
-  CardTrader token: it imports the files of the separate generator repo gab-25/cardledger_database from a private
+  `GET /api/games/` lists the games. Orders, shipments, sync and the order/shipment counters stay global. The catalog is rebuilt
+  only by the nightly `ledger/catalog_sync.py`: it imports the files of the separate generator repo gab-25/cardledger_database from a private
   S3 bucket (`ledger/catalog_files.py`: one `catalog/v1/<slug>.json` per game, a JSON object with `expansions` and `products`, no manifest; the generator is run
   by hand, `cardledger-db generate` then `upload`; settings `CARDLEDGER_CATALOG_*`: bucket, endpoint, region, access
   key and secret; `AWS_*` is never read): each game's file is downloaded every night and imported only when the
@@ -70,14 +72,119 @@ There is no linter or formatter configured. Settings come only from the environm
   Cardmarket's product lists are not read by the app. `Category.is_single` tells cards from sealed products and
   accessories (`is_product`). After each sync `catalog.reconcile_cards` links, folds and rewrites cards to the
   catalog's set code and number, per game. Collection items are added only from the catalog
-  (`catalog.card_for_blueprint`); products are stored Near Mint, non-foil. When publishing,
-  `services.resolve_blueprints` finds the CardTrader blueprint with the seller's token (CardTrader's `card_market_ids`, then
-  number, then name) and what CardTrader takes for a product (its language is sent only if taken).
-  `services.ct_game_id(client, game)` finds CardTrader's game through `/games` and stores it in `Game.ct_game_id`;
-  expansions are matched per CardTrader game, and `ledger/ct_properties.py` derives the language and foil property
-  names per game from the blueprint's `editable_properties` (Magic's payload is unchanged); a non-Magic listing
-  CardTrader can't describe fails instead of being published. The catalog and
+  (`catalog.card_for_blueprint`); products are stored Near Mint, non-foil. `Card.ct_blueprint_id` (unique) is the
+  CardTrader blueprint, matched by the extension and stored when a CardTrader report gives it (`ct_blueprint_id` in a
+  result, or in a stock row of a known listing: `extension._learn_blueprint`; one already used by another card is
+  skipped with a warning in the user's log). The catalog and
   collection JSON keep the old field names (`ct_id`, `category_id`), now holding Cardmarket ids.
+- **Markets and the browser extension**: `Market` ("cm" Cardmarket, "ct" CardTrader). Both are synced only by the
+  Chrome extension (separate repo cardledger_extension) from the user's browser, in a logged-in tab of each market
+  (seller area CSV export/import, orders pages), only when the user presses Sync; the server never calls a market.
+  There is no publish, sync, order import or ship endpoint: publishing is the plan/report cycle, orders arrive in
+  reports, shipping is `extension/shipped/` (both markets). `Listing` is one per (item, market) (`item.listings`, `item.listing_for(market)`,
+  `active_listings()`; there is no `item.listing`): `market_listing_id` (CardTrader product id / Cardmarket article
+  id; `Listing.ct_product_id` is a property over it), status to_publish|published|paused|error|sold, `error_message`,
+  `listed_at`, and `pending_delete` (removed by the user while on its market: hidden everywhere, deleted there by the
+  next sync, then here; re-listing reuses the row). `Order` has `market` + `market_order_id` (unique per owner and
+  market; `Order.ct_id` is a property), `buyer_name`, `items_total`, `shipping_cost`, `market_fee`, `net`;
+  `OrderItem` has `market_item_id`/`market_listing_id`. `services.save_order` upserts any market's order and removes
+  the sold copies once (`stock_applied`); **shared stock** (`services.share_stock`): the item's listings on the other
+  markets are capped to its remaining copies, a published one goes back to to_publish, one left with no copies is
+  removed (pending_delete; `services.remove_listing` never deletes a listing still on its market, it flags it).
+  `SyncConflict.market`; `services.diff_listings(user, market, remote)` serves both markets. `MarketConnection(user,
+  market)`: handle, status off|never|ok|error, last_sync, last_error, orders_synced_at (`services.connection`/
+  `mark_synced`); `services.market_states(user)` is `me`'s, the extension's and the sync page's `markets`, both from
+  their connection only: off until pairing creates them, then the status the reports set. Data migrations 0038-0040
+  turned the existing rows into market "ct", 0041 dropped `SyncService` (tokens), `SyncConflict.service` and
+  `Game.ct_game_id` (`test_markets_migration.py`).
+  Extension (`ledger/extension.py`, views `ledger/api/extension.py`, `/api/extension/`): pairing (`pair/` with the
+  session → a 10-minute `ABCD-1234` code; `claim/` without session, rate-limited per IP in the cache → the raw token,
+  shown once, and both markets' connections turned on; `ExtensionToken` keeps only its sha256; `tokens/` list and
+  revoke). The other endpoints accept only `Authorization: Token <token>` (`ExtensionTokenAuthentication`, used
+  nowhere else): `status/`, `plan/?market=` (`action_of`: create/update for to_publish|error, delete for paused or pending_delete rows on the
+  market; `games`: the slugs the user has listings of there, whose stock and orders the extension reads), `report/` (`apply_report`, idempotent per `ExtensionRun.run_id`: results, orders, stock reconciliation
+  with `unmatched` rows, CardTrader blueprints, connection, SyncLog), `shipped/` (any market: tracking code, paid or
+  hub_pending → sent). `GET /api/sync/` `connections` are the two markets (`market_states` + `orders_synced_at`,
+  `open_conflicts`); `GET /api/orders/` `orders_synced_at` comes from the connections. `me` adds
+  `extension: {paired, last_seen_at}`.
+- **Dealer data**: `CollectionItem.cost` (purchase price per copy) and `location` (storage, e.g. "A3·12"), in the
+  item API, the CSV columns and the order packing list (`orders/<pk>/` items carry `location`, sorted by it).
+  `GET /api/collection/` rows add `trend` (= `price`), `cost`, `location`, `listing_price` (lowest active price, any market),
+  `listings` (`[{market, status, price}]`), `added_at`; `?view=` (`_views()` in `ledger/api/collection.py`:
+  `below_trend`, `not_listed`, `stale`, `bulk`; Exists over the active listings of any market, a sold or removed
+  listing counts as none) with `views` counts that honour the other filters. `POST /api/collection/bulk/` acts on the user's items of
+  the game (`set_location`, `delete`, `list`/`reprice` through `services.list_at_trend` on `markets`, default `["ct"]`,
+  priced by `price_over_trend`). `GET /api/listings/` has `?market=`, rows per (item, market) and `by_market` stats;
+  `listings/<item>/` reads all of an item's listings and PUTs/DELETEs one by `market` (default ct);
+  `POST /api/listings/bulk/` pauses/resumes/deletes the listings of item ids (optionally of one market). `GET /api/overview/` (`ledger/api/overview.py`) is the dashboard of one game (never all): revenue and profit of
+  the orders with a line of the game (for its share, as in the reports), stock value by set, the game's price movers. The user's `accounts.SellerSettings` (created on
+  demand, `seller_settings_of`) feed it: `price_rounding` ("" = 0.05, else 0.05/0.10/0.50/1.00) is the bulk price
+  step, `hold_below_cost` skips items whose new price would be under their cost (the repricing rules raise to it instead; both use price_rounding), `default_condition` is the add
+  form's default, `reprice_before_sync` see Repricing (`auto_import_orders`/`push_prices` are stored only). Catalog rows add `rarity`, `year` (expansion
+  release year), `sold_30d` (order items → listing → item → card's printing, last 30 days, canceled/merged orders
+  out), `owned_locations`; filters `rarity`, `finish=foil`, `ordering`; `rarities`, and `suggestion` (pg_trgm, the
+  game's closest name) when a search finds nothing; `POST /api/catalog/report-missing/` stores a
+  `MissingCardReport` (admin).
+- **Repricing** (engine `ledger/repricing.py`, pure, no database; DB side `ledger/repricer.py`; views
+  `ledger/api/repricing.py`, `/api/repricing/`): prices are computed only here (no market call); a changed price on a
+  published listing goes back to to_publish so the next extension sync pushes it. `RepricingRule(user, name, position
+  1-based, kind price|floor|over_time, markets all|cm|ct, conditions [{field, op, value}] validated and normalized by
+  `forms.clean_conditions` (fields/ops in `repricing.CONDITION_OPS`), reference trend|low|avg7|avg30 (Cardmarket guide,
+  foil-aware via the card's `cm_product_id`)|cost|other_market (the item's active listing on the other market)|current,
+  adjust_pct, adjust_abs, round_to ("" = seller price_rounding, default 0.05), interval_days, enabled, draft)`.
+  `repricing.evaluate` per listing (to_publish, published, paused; not error/sold/pending_delete): the first active
+  price/over_time rule that applies (markets + conditions + its reference has a value) sets the candidate; then every
+  matching floor (highest wins); then `hold_below_cost` (raise to cost); then the market minimum (cm 0.02, ct 0.01);
+  rounding last (nearest step, up when a floor/cost/minimum binds); a price nothing set or raised stays exact; moves
+  under €0.01 are ignored. Over-time: one step (current × (1 + pct/100) + abs) once `listed_days ≥ interval_days`
+  and `Listing.last_step_at` is ≥ interval_days ago (set by the run). `RepricingRun(user, trigger manual|sync|adhoc,
+  counts, value_delta = Σ (new - old) × quantity, blocked)` + `RepricingChange` (copies the listing's name etc. and the
+  rule names so a run stays readable); the last 50 runs per user are kept (`repricer.KEEP_RUNS`). Endpoints: `rules/`
+  (GET with stats matched/last_moved/last_blocked, POST), `rules/<id>/` (PATCH partial, `position` moves; DELETE
+  renumbers), `rules/reorder/`, `rules/preview/` (unsaved rule at its position: matched/moves/up/down), `preview/`
+  (dry run: totals, 5 biggest, paged changes, `?market` limits only the results), `run/`, `runs/`, `runs/<id>/`,
+  `quote/?blueprint=` (per market; no matching price rule: the Cardmarket trend as fallback), `adhoc/` (ids, mode
+  trend_pct|change|set, basis, markets; floors/cost/minimum apply; dry_run or apply → listings to publish, an adhoc
+  run). `SellerSettings.reprice_before_sync`: `extension/plan/?market=` runs the rules on that market first (trigger
+  sync). `POST /api/collection/` takes `cost`, `location`, `list_on` (markets: `repricer.list_new_copies` lists the
+  copies added at the quoted price; a merged stack adds them to its active listing). `me.counts` adds `rules_on`
+  (enabled, not draft) and `rules_total`. The old collection bulk list/reprice (`services.list_at_trend`) still works
+  as before.
+- **Orders pick/pack/ship** (`ledger/api/orders.py`, helpers `ledger/shipping.py`): `Order.packed_at`, `issue_note`/
+  `issue_at`, `OrderItem.picked`. `Order.objects.with_stage()` annotates `stage` (first that
+  applies): issue (an issue note, request_for_cancel, lost, canceled with paid_at), shipped (sent/arrived/done, also
+  closed and unpaid canceled: nothing to pack), packed, picking (a line picked), to_pack. Orders still to ship (paid,
+  hub_pending) have `due_by` = local date of paid_at + max_shipping_days **working** days (Mon-Fri, 2 when null) and
+  `due` overdue/today/ok (Europe/Rome), else null. `GET /api/orders/?tab=to_pack|packed|shipped|issues` (old keys
+  to_ship/ct_zero → to_pack, completed → shipped): to_pack = to_pack + picking, overdue first then paid_at; shipped
+  (sent/arrived/done) newest first; tab counts and stats (+ `shipped_today`) honour `?market`. Detail adds `next_id`
+  (next in the to-pack queue, wrapping; null when alone). `PATCH orders/<pk>/items/<id>/ {picked}`, `POST
+  orders/<pk>/pack/ {force}` (409 `blocked` if a line is unpicked or the order is not paid/hub_pending; answers
+  `next_id`), `unpack/`, `issue/ {note}` (blank clears). `GET orders/pick-list/?ids=` merges lines by collection item
+  (else name/expansion/condition/language/foil), sorted by location (empty last) then name; `GET orders/slips/?ids=`
+  gives `business` (only `shop_name`, the profile's: the sender) and the order details (no invoices). Unknown or
+  other users' ids are ignored.
+- **Shipments** (`ledger/api/shipments.py`): `Shipment` (1:1 order) is created by `services.record_shipment(order)`
+  once the order is sent/arrived/done, called by `services.save_order` (extension reports) and
+  `extension.mark_shipped`; later calls only fill blanks (seller edits stay) and set `delivered_at` the first time
+  the order is seen arrived/done. Carrier from the shipping method's words (`shipping.carrier_for`), `expected_by` =
+  shipped date + max_shipping_days calendar days (tracked 5 / untracked 10 when null). Migration 0043 backfilled the
+  shipped orders (`test_orders_flow.ShipmentBackfillTest`). `Shipment.objects.with_status(today)` annotates `status`
+  (returned > delivered (delivered_at or arrived/done) > no_tracking (untracked method and no code) > late (past
+  expected_by) > in_transit) and `problem` (late, or no_tracking past expected_by). `GET /api/shipments/?tab=
+  in_transit|delivered|problems|returned&market=&page=` (in_transit includes late and no_tracking), `kpis`
+  (`on_time_pct` one decimal string, over deliveries with a date in the last 30 days), paginated;
+  `PATCH shipments/<id>/` (carrier, tracking_code, postage_cost, note kept when absent; delivered/returned booleans).
+  `me.counts` adds `orders_to_pack` and `shipment_problems` (every market). No tracking provider yet.
+- **Account extras** (`accounts/`): login takes the username or a unique email (case-insensitive), `remember`
+  false ends the session with the browser; password reset by email (`templates/accounts/`, link to the SPA's
+  `/login/reset/<uid>/<token>/`); `AuditEvent` (`record(user, kind, request)`: sign-in ok/failed on a known account,
+  password changed/reset; `token_saved`/`token_removed` only on old rows; IP is `REMOTE_ADDR`) behind `GET /api/account/activity/`;
+  uploads (purchase lot attachments) go to the default storage (`MEDIA_ROOT`, env `DJANGO_MEDIA_ROOT`, served by `config.views.media` under `/media/`; a compose volume).
+  `me` adds `counts.copies`/`live_listings` (per `?game`), `markets` (Cardmarket and CardTrader with `handle`, from
+  their MarketConnection, see Markets), `extension` and `prices_updated_at`; `GET /api/account/` is only
+  `password_help`. Price guide expressions for items (`trend_price`,
+  `item_guide_price`, foil-aware) live in `ledger/cardmarket.py`.
 - **Scan pipeline**: photo → `ledger/recognition.py` (`match_photo(photo, index, game, expansion)`: the
   `cardledger_vision` library compares the card's image with the game's vision index, locked on the session's
   expansion, and maps the Cardmarket ids it answers to the `Blueprint`s of the local catalog, dropping ids the catalog
@@ -97,14 +204,47 @@ There is no linter or formatter configured. Settings come only from the environm
   with `@doc(tags, summary, request=..., parameters=...)`; request bodies are generated from the validating form with
   `form_body()`, so keep the form and the docs in sync through it. Responses are documented as a generic object.
   Swagger UI is public at `/api/docs/`, schema at `/api/schema/`, version read from `pyproject.toml`.
+- **Purchases** (`ledger/purchases.py`, views `ledger/api/purchases.py`, `/api/purchases/`): `PurchaseLot(user, number,
+  code "PL-0001" per-user sequence (`purchases.create` locks the user row), type, seller, where, cards_estimate,
+  price_paid, paid_by, bought_on, next_step, status in_post|received|grading|listing|done, notes)` +
+  `PurchaseAttachment` (PDF/PNG/JPEG/GIF/WebP ≤ 10 MB, stored as `purchases/<uuid>.<ext>` in the default storage,
+  served by `/media/`). `CollectionItem.lot` and `ScanSession.lot` (SET_NULL; `scan.save_session` gives the saved items,
+  new or merged, the session's lot). Figures are computed from the items, every count in copies (rules in the
+  `ledger/purchases.py` docstring: graded = sorted, total = max(sorted, cards_estimate), trend_value/return_pct null
+  without a trend). List `?tab=all|to_grade|listing|done` (to_grade = in_post/received/grading, `PurchaseLot.TO_PROCESS`)
+  with tabs, KPIs (30 days by bought_on) and pages; `next-code/`; `<id>/` GET/PATCH (partial)/DELETE (items keep, files
+  deleted); `<id>/attachments/` (multipart `file`), `<id>/attachments/<aid>/` GET/DELETE; `<id>/list/ {markets}` lists
+  the unlisted items through `repricer.quote` + `put_on_sale`; `<id>/allocate-cost/` (cost = price_paid × trend /
+  lot trend value). Collection `?lot=<code>`, rows/detail `lot`, POST/PUT `lot` (code; PUT: absent keeps, blank
+  clears); scan session create and `PATCH sessions/<uuid>/` take `lot`. `me.counts.lots_to_process`.
+- **Reports** (`ledger/api/reports.py`, `/api/reports/?from&to&game&market`, `sets.csv`): computed in Python from the
+  orders paid in the range (canceled/merged out); rules in the module docstring (net = net or total − fee, line net
+  shared by line value, profit over lines whose item has a cost, always one game (default mtg, `all` refused) whose
+  share of an order is its lines' value,
+  postage = the counted orders' shipments, days_to_sell a number).
+- **History** (`ledger/snapshots.py`): `PriceSnapshot(cm_product_id, date, trend, trend_foil)` written by the catalog
+  sync per game after its prices (raw SQL: only products whose trends changed since their latest snapshot, dated the
+  guide's local date; pruned past 400 days keeping the value at the cutoff); catalog rows `change_30d` (vs the latest
+  snapshot ≤ 30 days ago, foil with `finish=foil`) and `GET /api/catalog/<ct_id>/history/?days=` (first point carried
+  to the window start). `StockValueSnapshot(user, game, date, value)` by `snapshot_stock_values` (command, and the end of
+  `catalog_sync.run_sync`); collection `stats.value_week_ago` = latest snapshot 7-13 days old.
+- **Saved views** (`ledger/api/saved_views.py`, `/api/collection/views/?game=`): `SavedView(user, game, name, query,
+  position)`; the query is stored without `page`/`game`; position moves/renumbers like repricing rules.
+- **Locations** (`ledger/api/locations.py`, `/api/locations/`): `Location(user, code unique per user, capacity, note)`;
+  used = copies of items with that location (every game), free = capacity − used (may be negative); codes used only
+  on items are listed with `id: null`; renaming a code moves the items; `suggest/?copies=` = most free slots ≥ copies.
+- **Overview extras**: `?game=` (one game, default mtg; `all` is refused), `?market=`, `?period=7d|30d|qtd|ytd` (rules
+  in the `ledger/api/overview.py` docstring: an order counts for the share of its lines of the game, `*_30d` follow the period, sell-through = sold / (stock now + sold), weeks split
+  singles/sealed by the line's card, alerts orders_to_pack/below_trend/not_listed/stale/locations_full with tone
+  danger|warn|info and SPA hrefs under the game; orders to pack and full locations are of every game).
 - **Background work**: Celery with Redis, no beat; no tasks are defined: `sync_catalog` runs the sync in-process and is scheduled
-  externally.
+  externally, like `snapshot_stock_values` (daily).
 
 ## Tests
 
 Django's `TestCase` on PostgreSQL. Most ledger tests extend `LedgerTestCase` (`ledger/tests.py`): a superuser `gab`
-with demo data and a CardTrader token, a second user `ami`, and `FakeCardTrader` patched into `services.make_client`
-(no network). Tests also live in `ledger/test_*.py`, `accounts/tests.py` and `config/tests.py`. `SchemaTest` in
+with demo data (a synced CardTrader connection; `publish()` marks its to-publish listings published as an extension
+sync would) and a second user `ami`; nothing touches the network. Tests also live in `ledger/test_*.py`, `accounts/tests.py` and `config/tests.py`. `SchemaTest` in
 `ledger/test_scan_api.py` fails on any drf-spectacular warning.
 
 ## Conventions

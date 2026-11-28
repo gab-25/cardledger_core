@@ -1,6 +1,7 @@
 """Who owns what: the owner data migration and the owned_by() querysets."""
 
 import os
+from datetime import date
 from decimal import Decimal
 from unittest import mock
 
@@ -10,8 +11,10 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
+from . import purchases
 from .models import (
-    Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, SyncConflict, SyncLog, SyncService,
+    ExtensionToken, Location, PurchaseAttachment, RepricingRule, RepricingRun, SavedView,
+    Card, CollectionItem, Listing, Order, OrderItem, ScanLine, ScanSession, Shipment, SyncConflict, SyncLog,
 )
 from .tests import LedgerTestCase, game
 
@@ -98,11 +101,10 @@ class OwnedByTest(TestCase):
         item = CollectionItem.objects.create(card=card, owner=user)
         listing = Listing.objects.create(item=item, price=Decimal("1.00"))
         order = Order.objects.create(ct_id=n, code=f"c{n}", owner=user)
-        order_item = OrderItem.objects.create(order=order, ct_id=n, name="x")
+        order_item = OrderItem.objects.create(order=order, market_item_id=n, name="x")
         session = ScanSession.objects.create(owner=user, game=game())
         line = ScanLine.objects.create(session=session, condition="NM")
-        service = SyncService.objects.create(name="CardTrader", user=user)
-        conflict = SyncConflict.objects.create(service=service, item=item, local_value="1", remote_value="2")
+        conflict = SyncConflict.objects.create(item=item, local_value="1", remote_value="2")
         log = SyncLog.objects.create(message=f"log {n}", owner=user)
         return {
             CollectionItem: item, Listing: listing, Order: order, OrderItem: order_item,
@@ -126,45 +128,69 @@ class OwnerIsolationSweepTest(LedgerTestCase):
     # URL name → how to find one of self.user's objects for its argument
     TARGETS = {
         "api_item": lambda t: t.item.pk, "api_listing": lambda t: t.listing.item_id,
-        "api_order": lambda t: t.order.pk, "api_order_ship": lambda t: t.order.pk,
-        "api_resolve": lambda t: t.conflict.pk,
+        "api_order": lambda t: t.order.pk, "api_order_pack": lambda t: t.order.pk,
+        "api_order_unpack": lambda t: t.order.pk, "api_order_issue": lambda t: t.order.pk,
+        "api_order_item": lambda t: (t.order.pk, t.order.items.first().pk),
+        "api_shipment": lambda t: t.shipment.pk,
+        "api_resolve": lambda t: t.conflict.pk, "api_extension_token": lambda t: t.ext_token.pk,
         "scan_api_session": lambda t: t.session.uuid, "scan_api_captures": lambda t: t.session.uuid,
         "scan_api_search": lambda t: t.session.uuid, "scan_api_manual": lambda t: t.session.uuid,
         "scan_api_review": lambda t: t.session.uuid,
         "scan_api_save": lambda t: t.session.uuid,
         "scan_api_line": lambda t: t.line.uuid, "scan_api_undo": lambda t: t.line.uuid,
         "scan_api_confirm": lambda t: t.line.uuid, "scan_api_frame": lambda t: t.line.uuid,
+        "api_repricing_rule": lambda t: t.rule.pk, "api_repricing_run_detail": lambda t: t.run.pk,
+        "api_purchase": lambda t: t.lot.pk, "api_purchase_attachments": lambda t: t.lot.pk,
+        "api_purchase_attachment": lambda t: (t.lot.pk, t.attachment.pk),
+        "api_purchase_list": lambda t: t.lot.pk, "api_purchase_allocate_cost": lambda t: t.lot.pk,
+        "api_collection_view": lambda t: t.saved_view.pk, "api_location": lambda t: t.location.pk,
     }
+    # URLs whose argument is a shared object (the catalog), not one of the user's
+    SHARED = {"api_catalog_history"}
 
     def setUp(self):
         super().setUp()
         self.item = CollectionItem.objects.owned_by(self.user).first()
         self.listing = Listing.objects.owned_by(self.user).first()
         self.order = Order.objects.owned_by(self.user).filter(state=Order.State.PAID).first()
+        self.shipment = Shipment.objects.owned_by(self.user).first()
         self.conflict = SyncConflict.objects.owned_by(self.user).first()
         self.session = ScanSession.objects.create(owner=self.user, game=game())
         self.line = ScanLine.objects.create(session=self.session, condition="NM", frame=b"jpeg")
+        self.ext_token = ExtensionToken.objects.create(user=self.user, key="0" * 64, name="Chrome")
+        self.rule = RepricingRule.objects.create(user=self.user, name="gab's")
+        self.run = RepricingRun.objects.create(user=self.user)
+        self.lot = purchases.create(self.user, bought_on=date(2026, 11, 1))
+        self.attachment = PurchaseAttachment.objects.create(lot=self.lot, file="purchases/x.pdf", name="x.pdf")
+        self.saved_view = SavedView.objects.create(user=self.user, game=game(), name="Bulk", query="view=bulk")
+        self.location = Location.objects.create(user=self.user, code="A1", capacity=10)
         self.client.force_login(self.other)
 
     def test_every_object_url_is_covered(self):
         from .urls import urlpatterns
 
         with_args = {p.name for p in urlpatterns if p.pattern.converters}
-        self.assertEqual(with_args - set(self.TARGETS), set(), "new URL with an object id: add it to TARGETS")
+        self.assertEqual(with_args - set(self.TARGETS) - self.SHARED, set(),
+                         "new URL with an object id: add it to TARGETS")
 
     def test_other_users_objects_are_404(self):
         for name, target in self.TARGETS.items():
-            url = reverse(f"ledger:{name}", args=[target(self)])
+            arg = target(self)
+            url = reverse(f"ledger:{name}", args=arg if isinstance(arg, tuple) else [arg])
             for method in ("get", "post", "delete"):
                 with self.subTest(name=name, method=method):
                     self.assertIn(getattr(self.client, method)(url).status_code, (404, 405))
         # nothing changed
         self.assertTrue(CollectionItem.objects.filter(pk=self.item.pk).exists())
+        self.assertTrue(PurchaseAttachment.objects.filter(pk=self.attachment.pk).exists())
+        self.assertTrue(SavedView.objects.filter(pk=self.saved_view.pk).exists())
+        self.assertTrue(Location.objects.filter(pk=self.location.pk).exists())
         self.assertEqual(self.session.lines.count(), 1)
 
     def test_some_method_answers_404_for_each_url(self):
         for name, target in self.TARGETS.items():
-            url = reverse(f"ledger:{name}", args=[target(self)])
+            arg = target(self)
+            url = reverse(f"ledger:{name}", args=arg if isinstance(arg, tuple) else [arg])
             statuses = {self.client.get(url).status_code, self.client.post(url).status_code,
                         self.client.put(url).status_code, self.client.patch(url).status_code}
             with self.subTest(name=name):
@@ -173,7 +199,8 @@ class OwnerIsolationSweepTest(LedgerTestCase):
     def test_list_pages_show_none_of_the_admins_cards(self):
         names = list(CollectionItem.objects.owned_by(self.user).values_list("card__name", flat=True))
         for name, params in (("api_collection", {}), ("api_listings", {}), ("api_catalog", {"owned": "1"}),
-                             ("api_sync", {}), ("api_orders", {})):
+                             ("api_sync", {}), ("api_orders", {}), ("api_shipments", {}),
+                             ("api_reports", {}), ("api_purchases", {}), ("api_overview", {})):
             resp = self.client.get(reverse(f"ledger:{name}"), params)
             with self.subTest(page=name):
                 self.assertEqual(resp.status_code, 200)

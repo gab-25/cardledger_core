@@ -11,10 +11,11 @@ class ScanError(Exception):
     pass
 
 
-def start_session(owner, game, expansion, condition, language):
-    """New session for owner, scanning cards of game (expansion: one of game's, or None for all)."""
+def start_session(owner, game, expansion, condition, language, lot=None):
+    """New session for owner, scanning cards of game (expansion: one of game's, or None for all; lot: the purchase
+    lot the saved items get)."""
     return ScanSession.objects.create(
-        owner=owner, game=game, expansion=expansion, default_condition=condition, default_language=language,
+        owner=owner, game=game, expansion=expansion, default_condition=condition, default_language=language, lot=lot,
     )
 
 
@@ -27,7 +28,7 @@ def open_sessions(owner, game=None):
     if game is not None:
         qs = qs.filter(game=game)
     return (qs.annotate(last_activity=Greatest("updated_at", Max("lines__updated_at")))
-            .select_related("game", "expansion").order_by("-last_activity", "-id"))
+            .select_related("game", "expansion", "lot").order_by("-last_activity", "-id"))
 
 
 def _twin(line):
@@ -176,11 +177,15 @@ def save_session(session):
             card = _card_for(line)
             item, created = CollectionItem.objects.get_or_create(
                 owner=session.owner, card=card, condition=line.condition, language=line.language, foil=line.foil,
-                defaults={"quantity": line.quantity},
+                defaults={"quantity": line.quantity, "lot_id": session.lot_id},
             )
             if not created:
                 item.quantity += line.quantity
-                item.save(update_fields=["quantity", "updated_at"])
+                fields = ["quantity", "updated_at"]
+                if session.lot_id:
+                    item.lot_id = session.lot_id
+                    fields.append("lot")
+                item.save(update_fields=fields)
             saved += line.quantity
         session.status = ScanSession.Status.SAVED
         session.save(update_fields=["status", "updated_at"])

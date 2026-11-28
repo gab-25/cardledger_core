@@ -1,6 +1,7 @@
-"""The sync API (/api/sync/): connections, conflicts to resolve and the activity log."""
+"""The sync API (/api/sync/): the markets' connections, conflicts to resolve and the activity log. Syncing itself is
+done by the browser extension (its reports feed the connections, conflicts and log)."""
 
-from django.db.models import Count, Q
+from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
 from rest_framework.decorators import api_view
@@ -8,41 +9,38 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from .. import services
-from ..cardtrader import CardTraderError
-from ..models import Listing, SyncConflict, SyncLog, SyncService
+from ..models import Listing, MarketConnection, SyncConflict, SyncLog
 from .common import body, doc, messages_response, msg
-from .errors import ServiceError
 
 TAGS = ["sync"]
 LOG_SIZE = 20
 
 
-@doc(TAGS, "Connections, open conflicts and the last activity")
+@doc(TAGS, "The markets' connections (Cardmarket, CardTrader: as me's markets, plus when the orders were last read "
+           "and the open conflicts), the changes waiting for the next sync, open conflicts and the last activity")
 @api_view(["GET"])
 def sync(request):
     user = request.user
-    services.get_cardtrader(user)
-    connections = SyncService.objects.filter(user=user).annotate(
-        open_conflicts=Count("conflicts", filter=Q(conflicts__resolution=SyncConflict.Resolution.OPEN))
+    orders_synced = dict(MarketConnection.objects.owned_by(user).values_list("market", "orders_synced_at"))
+    open_conflicts = dict(
+        SyncConflict.objects.owned_by(user).filter(resolution=SyncConflict.Resolution.OPEN)
+        .order_by().values_list("market").annotate(n=Count("pk"))
     )
     conflicts = (
         SyncConflict.objects.owned_by(user).filter(resolution=SyncConflict.Resolution.OPEN)
-        .select_related("item__card", "service")
+        .select_related("item__card")
     )
     return Response({
         "pending_changes": Listing.objects.owned_by(user).filter(status=Listing.Status.TO_PUBLISH).count(),
         "connections": [
-            {
-                "name": s.name, "description": s.description, "direction": s.direction, "last_sync": s.last_sync,
-                "orders_synced_at": s.orders_synced_at, "token_ok": bool(s.api_token),
-                "open_conflicts": s.open_conflicts,
-            }
-            for s in connections
+            {**m, "orders_synced_at": orders_synced.get(m["code"]), "open_conflicts": open_conflicts.get(m["code"], 0)}
+            for m in services.market_states(user)
         ],
         "conflicts": [
             {
                 "id": c.pk, "name": c.item.card.name, "set_code": c.item.card.set_code,
-                "condition": c.item.condition, "language": c.item.language, "service": c.service.name,
+                "condition": c.item.condition, "language": c.item.language, "service": c.get_market_display(),
+                "market": c.market,
                 "local_value": c.local_value, "remote_value": c.remote_value,
             }
             for c in conflicts
@@ -52,18 +50,6 @@ def sync(request):
             for l in SyncLog.objects.visible_to(user)[:LOG_SIZE]
         ],
     })
-
-
-@doc(TAGS, "Sync listings with CardTrader and look for conflicts")
-@api_view(["POST"])
-def run(request):
-    try:
-        conflicts = services.sync_all(request.user)
-    except CardTraderError as exc:
-        raise ServiceError(f"Sync failed: {exc}")
-    return messages_response(
-        msg("success", f"Sync complete: {conflicts} conflict{'s' if conflicts != 1 else ''} to resolve.")
-    )
 
 
 @doc(TAGS, "Resolve a conflict keeping the Ledger value or the remote one (keep: ledger | remote)",

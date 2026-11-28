@@ -143,9 +143,10 @@ class SaveTest(ScanTestCase):
         item = self.printing(listing_status=Listing.Status.PUBLISHED)
         self.capture("a")
         scan.save_session(self.session)
-        item.listing.refresh_from_db()
+        listing = item.listing_for()
+        listing.refresh_from_db()
         item.refresh_from_db()
-        self.assertEqual((item.quantity, item.listing.quantity, item.listing.status), (2, 1, Listing.Status.PUBLISHED))
+        self.assertEqual((item.quantity, listing.quantity, listing.status), (2, 1, Listing.Status.PUBLISHED))
 
     def test_save_blocked_by_unconfirmed(self):
         self.capture("a", certain=False)

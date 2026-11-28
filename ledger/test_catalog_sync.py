@@ -194,7 +194,6 @@ class SyncTest(CatalogSyncTestCase):
         self.assertEqual(Category.objects.get(game=game(), cm_id=5).name, "Magic Display")
         magic = game()
         self.assertEqual(magic.catalog_sha256, self.files.sha256("mtg"))
-        self.assertEqual(self.ct.calls, [])  # CardTrader is never contacted
 
     def test_each_game_gets_its_own_catalog(self):
         self.sync()

@@ -1,5 +1,13 @@
 from django import forms
 from django.contrib.auth import get_user_model
+from django.contrib.auth.forms import AuthenticationForm
+
+from ledger.forms import keep_absent
+from ledger.models import Condition
+
+from .models import Profile, SellerSettings
+
+PRICE_ROUNDINGS = [("", "Default (0.05)"), ("0.05", "0.05"), ("0.10", "0.10"), ("0.50", "0.50"), ("1.00", "1.00")]
 
 
 class ProfileForm(forms.ModelForm):
@@ -16,9 +24,61 @@ class ProfileForm(forms.ModelForm):
         return email
 
 
-class CardTraderTokenForm(forms.Form):
-    token = forms.CharField(
-        label="CardTrader API token",
-        widget=forms.PasswordInput(render_value=False, attrs={"autocomplete": "off"}),
-        help_text="Found in your CardTrader profile settings, under API. It is checked with CardTrader before saving.",
-    )
+class BusinessProfileForm(forms.ModelForm):
+    """The shop name of the profile; left out of the request, it keeps its value."""
+
+    OPTIONAL = ["shop_name"]
+
+    class Meta:
+        model = Profile
+        fields = ["shop_name"]
+
+    def __init__(self, data=None, *args, instance=None, **kwargs):
+        super().__init__(keep_absent(data, instance, self.OPTIONAL), *args, instance=instance, **kwargs)
+
+
+class LoginForm(AuthenticationForm):
+    """Django's login form taking the username or the email address (case-insensitive) in `username`, and remember.
+
+    An email shared by several users matches none of them (the usual invalid-login error).
+    """
+
+    remember = forms.BooleanField(required=False, initial=True,
+                                  help_text="Stay logged in (default); false: the session ends with the browser")
+
+    def clean(self):
+        login = (self.cleaned_data.get("username") or "").strip()
+        User = get_user_model()
+        if login and "@" in login and not User.objects.filter(**{User.USERNAME_FIELD: login}).exists():
+            users = list(User.objects.filter(email__iexact=login)[:2])
+            if len(users) == 1:
+                self.cleaned_data["username"] = users[0].get_username()
+        return super().clean()
+
+    def target_user(self):
+        """The account the attempt names (by username or unique email), None when there is none."""
+        User = get_user_model()
+        login = (self.cleaned_data.get("username") or self.data.get("username") or "").strip()
+        if not login:
+            return None
+        user = User.objects.filter(**{User.USERNAME_FIELD: login}).first()
+        if user is None and "@" in login:
+            users = list(User.objects.filter(email__iexact=login)[:2])
+            user = users[0] if len(users) == 1 else None
+        return user
+
+
+class SellerSettingsForm(forms.ModelForm):
+    """The seller settings; left out of the request, a field keeps its value (partial PUT)."""
+
+    default_condition = forms.ChoiceField(choices=Condition.choices)
+    price_rounding = forms.ChoiceField(choices=PRICE_ROUNDINGS, required=False,
+                                       help_text='Step of bulk prices; "": the default 0.05')
+
+    class Meta:
+        model = SellerSettings
+        fields = ["auto_import_orders", "push_prices", "hold_below_cost", "default_condition", "price_rounding",
+                  "reprice_before_sync"]
+
+    def __init__(self, data=None, *args, instance=None, **kwargs):
+        super().__init__(keep_absent(data, instance, self.Meta.fields), *args, instance=instance, **kwargs)

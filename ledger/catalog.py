@@ -15,18 +15,16 @@ def normalize_number(value):
     return value
 
 
-def _live_listing(item):
-    from .models import Listing
-
-    listing = getattr(item, "listing", None)
-    return listing if listing is not None and listing.status != Listing.Status.SOLD else None
+def _live_listings(item):
+    """{market: listing} of the item's active listings (not sold, not removed)."""
+    return {l.market: l for l in item.listings.all() if l.is_active}
 
 
 def _merge_pairs(source, target):
     """[(source item, same owner's twin on target or None)]: copies only ever fold into their owner's own."""
     pairs = []
-    for item in source.items.select_related("listing"):
-        twin = target.items.select_related("listing").filter(
+    for item in source.items.prefetch_related("listings"):
+        twin = target.items.prefetch_related("listings").filter(
             owner_id=item.owner_id, condition=item.condition, language=item.language, foil=item.foil
         ).first()
         pairs.append((item, twin))
@@ -34,10 +32,11 @@ def _merge_pairs(source, target):
 
 
 def clashing_owners(source, target):
-    """The users (ids) whose copies on both cards have live listings: merging would need two listings in one."""
+    """The users (ids) whose copies on both cards have live listings on the same market: merging would need two
+    listings in one."""
     return {
         item.owner_id for item, twin in _merge_pairs(source, target)
-        if twin is not None and _live_listing(item) and _live_listing(twin)
+        if twin is not None and set(_live_listings(item)) & set(_live_listings(twin))
     }
 
 
@@ -48,7 +47,6 @@ def merge_cards(source, target):
     if clashing_owners(source, target):
         return False
     pairs = _merge_pairs(source, target)
-    live_listing = _live_listing
 
     with transaction.atomic():
         for item, twin in pairs:
@@ -58,9 +56,11 @@ def merge_cards(source, target):
                 continue
             twin.quantity += item.quantity
             twin.save(update_fields=["quantity", "updated_at"])
-            listing = getattr(item, "listing", None)
-            if listing is not None and live_listing(twin) is None:
-                old = getattr(twin, "listing", None)  # a sold listing on the twin gives way
+            live = _live_listings(twin)
+            for listing in item.listings.all():
+                if listing.market in live:
+                    continue  # the twin's live listing stays; this one goes with the item
+                old = twin.listing_for(listing.market)  # a sold listing on the twin gives way
                 if old is not None:
                     old.delete()
                 listing.item = twin

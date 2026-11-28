@@ -137,7 +137,8 @@ class CatalogApiTest(LedgerTestCase):
     def test_set_and_number_filter_ignores_leading_zeros(self):
         data = self.search(set="m21", number="007")
         self.assertEqual([p["name"] for p in data["results"]], ["Basri Ket"])
-        self.assertEqual(data["filters"], {"q": "", "set": "m21", "number": "7", "category": None, "owned": False})
+        self.assertEqual(data["filters"], {"q": "", "set": "m21", "number": "7", "category": None, "owned": False,
+                                           "rarity": "", "finish": "", "ordering": ""})
 
     def test_category_filter_alone_searches(self):
         data = self.search(category="4")
@@ -190,7 +191,8 @@ class CatalogApiTest(LedgerTestCase):
     def test_no_criteria_lists_latest_releases(self):
         data = self.search(q="  ")
         self.assertFalse(data["searched"])
-        self.assertEqual(data["filters"], {"q": "", "set": "", "number": "", "category": None, "owned": False})
+        self.assertEqual(data["filters"], {"q": "", "set": "", "number": "", "category": None, "owned": False,
+                                           "rarity": "", "finish": "", "ordering": ""})
         # newest expansion (highest CardTrader id) first, then name like a search
         self.assertEqual([(p["expansion_code"], p["name"]) for p in data["results"]], [
             ("dmr", "Counterspell"), ("dmr", "Dominaria Remastered Draft Booster Box"),

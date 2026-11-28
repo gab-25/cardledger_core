@@ -4,7 +4,7 @@ from django.urls import include, path, re_path
 from django.views.generic import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
-from .views import ui_app
+from .views import media, ui_app
 
 urlpatterns = [
     path("favicon.ico", RedirectView.as_view(url=static("ui/favicon.svg"))),
@@ -13,6 +13,7 @@ urlpatterns = [
     path("api/schema/", SpectacularAPIView.as_view(), name="api_schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="api_schema"), name="api_docs"),
     path("", include("ledger.urls")),
-    # Every other URL is a page of the React UI (last: /api/, /admin/ and /static/ are never pages).
-    re_path(r"^(?!api/|admin/|static/).*$", ui_app, name="ui"),
+    path("media/<path:path>", media, name="media"),
+    # Every other URL is a page of the React UI (last: /api/, /admin/, /static/ and /media/ are never pages).
+    re_path(r"^(?!api/|admin/|static/|media/).*$", ui_app, name="ui"),
 ]

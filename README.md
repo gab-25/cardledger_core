@@ -1,7 +1,8 @@
 # cardledger_core
-CardLedger — trading card collection and CardTrader sales manager (Django).
+CardLedger — trading card collection and Cardmarket / CardTrader sales manager (Django).
 
-This repository is the server: the data, the CardTrader integration, card recognition and a JSON API under `/api/`.
+This repository is the server: the data, card recognition, the browser extension's sync endpoints and a JSON API
+under `/api/`.
 The interface is a React single-page app in [cardledger_ui](https://github.com/gab-25/cardledger_ui); Django serves
 its `index.html` for every page URL and its assets under `/static/ui/`.
 
@@ -9,8 +10,9 @@ its `index.html` for every page URL and its assets under `/static/ui/`.
 
 - `config/` — Django project (settings, root URLs); `config/views.py` serves the built React UI (`index.html` for
   every URL that is not `/api/`, `/admin/` or `/static/`)
-- `accounts/` — account API (`accounts/api.py`): who is logged in, login/logout, profile, password, CardTrader token
-- `ledger/` — domain: cards, collection, sale listings, shipments, CardTrader client and sync, CSV import/export;
+- `accounts/` — account API (`accounts/api.py`): who is logged in, login/logout, profile (shop name), password
+- `ledger/` — domain: cards, collection, sale listings per market, orders, the extension's sync (`ledger/extension.py`), CSV
+  import/export;
   `ledger/api/` is the JSON API of every page (collection, sale, cards, orders, sync, scan)
 
 ## Getting started
@@ -93,27 +95,24 @@ is none (the migration stops with a message otherwise, and the new container doe
 the old image, or with a one-off container of the new one, e.g.
 `docker compose run --rm cardledger python manage.py createsuperuser`, which skips the migrations).
 
-## CardTrader
+## Markets: Cardmarket and CardTrader
 
-Every user connects their own CardTrader token from **Profile and settings → Connected services** (the token is checked
-with CardTrader before it is saved; only its owner can show or copy it there); it is used only for that user's listings, orders and
-shipments, and a CardTrader account can be connected to one user only. Nothing else uses a CardTrader token: the card
-catalog, prices and scanning need none. `CARDTRADER_API_TOKEN` is no longer read (nor passed by `compose.yaml`): on upgrade, if it is
-still set where `migrate` runs and no token was saved in the profile, the migration copies it into the first
-superuser's profile; otherwise connect the token from the profile after upgrading.
+Both marketplaces are synced only by the CardLedger browser extension (separate repo cardledger_extension), from the
+user's own browser, in a logged-in tab of each market (the seller area's stock export/import and orders pages), and
+only when the user presses Sync. The server never calls a market and stores no market token or password.
 
-- **Publish**: listings "To publish" are created/updated on CardTrader with the bulk API. Items added from the catalog
-  already know their CardTrader product; cards imported from CSV are matched to the catalog (blueprint) by set code +
-  name the first time, and unmatched cards stay pending with a warning. Sealed products and accessories are sold with
-  only the properties CardTrader takes for them (a language, when it has one).
-- **Sync all**: imports sale orders (removing sold copies from the Ledger following CardTrader's CardTrader Zero
-  rules), then compares published listings with your CardTrader inventory and opens conflicts.
-- **Shipments**: orders to ship with packing number, address, printable packing list, tracking code and
-  "Mark as shipped".
+- **Pairing**: the Account page asks for a code (`POST /api/extension/pair/`), the extension exchanges it for its own
+  token (`claim/`); pairing turns both markets on (never synced).
+- **Sync** (per market): the extension reads what to push (`GET /api/extension/plan/?market=`: listings to create,
+  update or delete), applies it on the market, reads the stock and the orders there and reports the run
+  (`POST /api/extension/report/`): results, orders (sold copies removed once; the item's listings on the other market
+  capped: shared stock), the stock compared with the listings (conflicts, unmatched rows), the connection's state and
+  a log entry. A CardTrader run may report the CardTrader blueprint of a listing, stored on its card.
+- **Shipments**: orders to ship with packing number, address and printable packing list; the extension marks an order
+  shipped on its market (with the tracking code) and tells the server (`POST /api/extension/shipped/`).
 
-Client: `ledger/cardtrader.py` (endpoints from https://www.cardtrader.com/docs/api/full/reference).
-Condition mapping: M→Mint, NM→Near Mint, EX→Slightly Played, GD→Moderately Played, LP→Played,
-PL→Heavily Played, PO→Poor.
+Upgrading from a version with CardTrader tokens: migration 0041 deletes the stored tokens; pair the extension from the
+Account page to keep syncing CardTrader.
 
 ## Card database and Cardmarket prices
 
@@ -189,7 +188,7 @@ collection (the scan sets no prices and puts nothing on sale).
   at `/api/docs/` (both public); `uv run python manage.py spectacular --file schema.yaml` writes the schema.
   Errors use DRF's format: `{"field": ["message"]}` for validation (400), otherwise `{"detail", "code",
   "help_url"?}`, with `code` such as `not_authenticated` (403), `not_found`, `closed` (409: the session was already
-  saved), `blocked` (409), `service_missing` (503) or `service_error` (502: CardTrader failed). Actions answer
+  saved), `blocked` (409), `service_missing` (503) or `service_error` (502: an external service failed). Actions answer
   `{"messages": [{"level", "text"}]}`, shown by the UI like Django's messages.
 - The Docker image builds the UI from the `ui` submodule (a Node stage in the `Dockerfile`), so the submodule must be
   checked out before `docker build`. To ship a new version of the interface, move the submodule to its release tag
@@ -223,7 +222,7 @@ real certificate that only your own devices can reach; cardledger_ui's `npm run 
 4. In cardledger_ui run `npm run dev:phone`: it checks Tailscale and that Django accepts the tailnet name, then
    publishes the Vite dev server (the UI with live reload, `/api/`, `/admin/` and `/static/` forwarded to Django) with
    `tailscale serve` and prints the `https://<pc>.<tailnet>.ts.net` address. Ctrl+C removes the Tailscale rule.
-5. Open that address on the computer, connect CardTrader in **Profile and settings**, start a session in
+5. Open that address on the computer, start a session in
    **Scan cards** and scan the QR code with the phone.
 
 To try the production setup instead (Django serving the built UI, as in the Docker image), build it with

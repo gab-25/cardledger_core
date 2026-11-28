@@ -25,23 +25,34 @@ def body(name, fields):
     return inline_serializer(name, fields)
 
 
+def form_fields(form_class):
+    """The serializer fields documenting a Django form's fields."""
+    return {key: _form_field(field) for key, field in form_class.base_fields.items()}
+
+
 def form_body(name, form_class, **extra):
     """The request body of a view that validates request.data with a Django form: the form's fields, plus extra."""
-    return body(name, {**{key: _form_field(field) for key, field in form_class.base_fields.items()}, **extra})
+    return body(name, {**form_fields(form_class), **extra})
 
 
 def _form_field(field):
     kwargs = {"required": field.required}
     if isinstance(field, forms.BooleanField):
         return serializers.BooleanField(required=False)
+    if isinstance(field, forms.MultipleChoiceField):
+        return serializers.MultipleChoiceField(choices=list(field.choices), **kwargs)
     if isinstance(field, forms.ChoiceField):
         return serializers.ChoiceField(choices=[c for c in field.choices if c[0] != ""], **kwargs)
     if isinstance(field, forms.DecimalField):  # before IntegerField, its parent
         return serializers.DecimalField(max_digits=field.max_digits, decimal_places=field.decimal_places, **kwargs)
     if isinstance(field, forms.IntegerField):
         return serializers.IntegerField(min_value=field.min_value, max_value=field.max_value, **kwargs)
+    if isinstance(field, forms.JSONField):  # before CharField, its parent
+        return serializers.JSONField(**kwargs)
     if isinstance(field, forms.FileField):
         return serializers.FileField(**kwargs)
+    if isinstance(field, forms.DateField):
+        return serializers.DateField(**kwargs)
     kwargs.update(max_length=field.max_length, allow_blank=not field.required)
     if isinstance(field, forms.EmailField):
         return serializers.EmailField(**kwargs)

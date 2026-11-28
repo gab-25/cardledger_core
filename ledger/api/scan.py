@@ -66,7 +66,8 @@ def _validated(serializer_class, data, **kwargs):
 
 def _get_session(user, uid, *, open_only=True):
     """The user's session (another user's answers 404, like a missing one)."""
-    session = get_object_or_404(ScanSession.objects.owned_by(user).select_related("game", "expansion"), uuid=uid)
+    session = get_object_or_404(ScanSession.objects.owned_by(user).select_related("game", "expansion", "lot"),
+                                uuid=uid)
     if open_only and session.status != ScanSession.Status.OPEN:
         raise Closed()
     return session
@@ -123,10 +124,10 @@ def sessions(request):
         game = game_param(request.query_params) if request.query_params.get("game", "").strip() else None
         listed = scan.open_sessions(request.user, game)[:SESSION_LIST_LIMIT]
         return Response(s.SessionListSerializer({"results": listed}, context={"request": request}).data)
-    data = _validated(s.SessionCreateSerializer, request.data)
+    data = _validated(s.SessionCreateSerializer, request.data, context={"user": request.user})
     expansion = data["expansion_id"]
-    session = scan.start_session(request.user, data["game"], expansion, data["condition"],
-                                 data["language"])
+    session = scan.start_session(request.user, data["game"], expansion, data["condition"], data["language"],
+                                 lot=data["lot"])
     body = s.SessionCreatedSerializer({"session": session, "warnings": []}, context={"request": request})
     return Response(body.data, status=status.HTTP_201_CREATED)
 
@@ -134,8 +135,16 @@ def sessions(request):
 @extend_schema(methods=["GET"], tags=TAGS, responses=s.SessionDetailSerializer, summary="A session, open or saved")
 @extend_schema(methods=["DELETE"], tags=TAGS, responses={204: None},
                summary="Discard an open session with its cards; a saved one can't be discarded")
-@api_view(["GET", "DELETE"])
+@extend_schema(methods=["PATCH"], tags=TAGS, request=s.SessionUpdateSerializer, responses=s.SessionDetailSerializer,
+               summary="Change an open session: lot, the purchase lot the saved items get")
+@api_view(["GET", "PATCH", "DELETE"])
 def session_detail(request, uid):
+    if request.method == "PATCH":
+        session = _get_session(request.user, uid)
+        data = _validated(s.SessionUpdateSerializer, request.data, context={"user": request.user})
+        session.lot = data["lot"]
+        session.save(update_fields=["lot", "updated_at"])
+        return Response(s.SessionDetailSerializer({"session": session}, context={"request": request}).data)
     if request.method == "DELETE":
         try:
             scan.discard_session(_get_session(request.user, uid))
